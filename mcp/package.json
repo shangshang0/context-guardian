@@ -1,0 +1,12 @@
+{
+  "name": "@shangtools/context-guardian-mcp",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "context-guardian-mcp": "server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

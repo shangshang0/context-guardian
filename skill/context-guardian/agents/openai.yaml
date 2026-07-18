@@ -1,0 +1,4 @@
+interface:
+  display_name: "Context Guardian"
+  short_description: "Protect and recover oversized Codex agent contexts"
+  default_prompt: "Use $context-guardian to inspect and safely protect a Codex task context."
