@@ -11,8 +11,6 @@ services:
     cpus: 1.0
     tmpfs:
       - /tmp:size=16m,mode=1777
-    volumes:
-      - relay-tenants:/data
     expose:
       - "8080"
     logging:
@@ -21,24 +19,28 @@ services:
         max-size: "5m"
         max-file: "2"
   https:
-    image: caddy:2.10-alpine
+    image: caddy:2.10.2-alpine
     restart: unless-stopped
     read_only: true
     cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 64
     mem_limit: 96m
     cpus: 0.5
     depends_on: ["relay"]
+    environment:
+      CONTEXT_RELAY_DOMAIN: ${CONTEXT_RELAY_DOMAIN:?set CONTEXT_RELAY_DOMAIN}
+      CONTEXT_RELAY_ACME_EMAIL: ${CONTEXT_RELAY_ACME_EMAIL:?set CONTEXT_RELAY_ACME_EMAIL}
     ports:
-      - "5003:5003"
+      - "80:80"
+      - "443:443"
     tmpfs:
       - /config:size=8m,mode=0700
-      - /data:size=8m,mode=0700
       - /tmp:size=8m,mode=1777
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./certs:/certs:ro
+      - relay-caddy-data:/data
     logging:
       driver: local
       options:
@@ -46,4 +48,4 @@ services:
         max-file: "2"
 
 volumes:
-  relay-tenants:
+  relay-caddy-data:

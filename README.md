@@ -116,7 +116,7 @@ The relay listens on TCP `5003` and forwards encrypted traffic to the local HTTP
 
 ### Install-and-use public Relay mode
 
-For users who do not operate an SSH server, the bundled Rust Relay client generates a random 128-bit tenant ID and 256-bit tenant secret on first start. The identity is saved only in a local mode-`0600` file. The Relay stores only the secret hash and never creates an image directory.
+For users who do not operate an SSH server, the bundled Rust Relay client generates a 256-bit tenant secret, derives its 128-bit tenant ID, and computes a small registration proof on first start. This prevents another client from claiming the ID without the matching secret and raises the cost of bulk registration abuse. The identity is saved only in a local mode-`0600` file. The Relay stores only the secret hash and never creates an image directory.
 
 ```sh
 ./scripts/install.sh
@@ -124,12 +124,16 @@ For users who do not operate an SSH server, the bundled Rust Relay client genera
 
 On macOS the installer enables the public Relay automatically. Set `CONTEXT_GUARDIAN_SKIP_PUBLIC_RELAY=1` to install binaries without network image support, or set `CONTEXT_RELAY_URL` to a self-hosted Relay. The Rust guardian itself remains opt-in: pass the four values written to `~/.codex/context-guardian/image-publishing.env` only to guarded tasks that should preserve image URLs.
 
+Set `CONTEXT_GUARDIAN_DRY_RUN=1` to generate and validate launchd configuration without loading services. This is useful for CI and nonstandard HOME/CODEX_HOME paths.
+
 No SSH account, inbound port, or manually created key is required. Each public image URL contains its tenant ID and the existing short-lived image signature. A different tenant secret cannot poll or submit another tenant's requests; invalid tenants, bad credentials, and scanned image paths all return the same `404` response.
 
 The installer initializes the identity before starting the daemon. Client logs never print the tenant secret and normal daemon startup does not print the tenant ID.
 Standard `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` environment variables are supported, including SOCKS proxies, for networks that filter nonstandard HTTPS ports.
 
-The minimal Relay protocol carries image bytes through server memory and does not persist them. Operators can deploy `relay/compose.yaml` behind a trusted HTTPS reverse proxy. The container is non-root, read-only, capability-free, resource-limited, and mounts only a small tenant-hash volume. Sensitive deployments should self-host because the Relay operator can still observe transient image bytes in this first protocol version.
+The minimal Relay protocol carries image bytes through server memory and does not persist them. By default tenant hashes are also memory-only; clients re-register automatically after a Relay restart. Operators that need persistent registrations can set `CONTEXT_RELAY_TENANT_STORE` to a writable private file. Deploy `relay/compose.yaml` behind a trusted HTTPS reverse proxy. The container is non-root, read-only, capability-free, resource-limited, and has no host mounts. Sensitive deployments should self-host because the Relay operator can still observe transient image bytes in this first protocol version.
+
+The Relay server is fully open source. See [relay/README.md](relay/README.md) for the Docker self-hosting flow. Users can keep the default public domain or set `CONTEXT_RELAY_URL=https://relay.example.com` during installation.
 
 Enable publishing for one guardian:
 

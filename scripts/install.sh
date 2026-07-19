@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cargo build --manifest-path "$root/Cargo.toml" --release
 cargo build --manifest-path "$root/relay/Cargo.toml" --release --bin context-relay-client
 

@@ -16,6 +16,7 @@ const defaultBinary = process.platform === "win32"
 const binary = process.env.CONTEXT_GUARDIAN_BIN || (process.env.CONTEXT_GUARDIAN_INSTALLED === "1" ? installedSibling : defaultBinary);
 const serviceScript = process.env.CONTEXT_GUARDIAN_SERVICE_SCRIPT || join(root, "scripts", "service.sh");
 const relayClientScript = process.env.CONTEXT_RELAY_CLIENT_SCRIPT || join(root, "scripts", "relay-client.sh");
+const MAX_CHILD_OUTPUT_BYTES = 1024 * 1024;
 
 const tools = [
   {
@@ -97,10 +98,25 @@ function run(command, args) {
     const child = spawn(command, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", chunk => { stdout += chunk; });
-    child.stderr.on("data", chunk => { stderr += chunk; });
+    let outputBytes = 0;
+    let outputExceeded = false;
+    const append = (target, chunk) => {
+      outputBytes += chunk.length;
+      if (outputBytes > MAX_CHILD_OUTPUT_BYTES) {
+        outputExceeded = true;
+        child.kill("SIGKILL");
+        return target;
+      }
+      return target + chunk.toString("utf8");
+    };
+    child.stdout.on("data", chunk => { stdout = append(stdout, chunk); });
+    child.stderr.on("data", chunk => { stderr = append(stderr, chunk); });
     child.on("error", rejectRun);
     child.on("close", code => {
+      if (outputExceeded) {
+        rejectRun(new Error("child output exceeded 1 MiB safety limit"));
+        return;
+      }
       if (code === 0) resolveRun({ stdout, stderr });
       else rejectRun(new Error(stderr.trim() || stdout.trim() || `command exited with ${code}`));
     });
@@ -161,7 +177,7 @@ function respond(message) {
 
 async function handle(request) {
   if (request.method === "initialize") {
-    return { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "context-guardian", version: "0.4.0" } };
+    return { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "context-guardian", version: "0.4.1" } };
   }
   if (request.method === "tools/list") return { tools };
   if (request.method === "tools/call") {

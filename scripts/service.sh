@@ -10,13 +10,18 @@ case "$thread_id" in
 esac
 
 if [ -z "$binary" ]; then
-  script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
   binary="$script_dir/../target/release/context-guardian"
 fi
 
 codex_home=${CODEX_HOME:-${HOME:?HOME is required}/.codex}
 log_dir="$codex_home/context-guardian/logs"
 mkdir -p "$log_dir"
+chmod 700 "$log_dir"
+
+xml_escape() {
+  printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+}
 
 case "$(uname -s)" in
   Darwin)
@@ -25,13 +30,32 @@ case "$(uname -s)" in
     case "$action" in
       install)
         mkdir -p "$HOME/Library/LaunchAgents"
-        escaped_binary=$(printf '%s' "$binary" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
-        escaped_home=$(printf '%s' "$codex_home" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
-        escaped_log=$(printf '%s' "$log_dir" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+        escaped_binary=$(xml_escape "$binary")
+        escaped_home=$(xml_escape "$codex_home")
+        escaped_log=$(xml_escape "$log_dir")
+        image_config="$codex_home/context-guardian/image-publishing.env"
+        image_arguments=''
+        if [ -f "$image_config" ]; then
+          [ "$(stat -f '%Lp' "$image_config")" = 600 ] || { echo "$image_config must have mode 600" >&2; exit 2; }
+          image_base_url=$(sed -n 's/^CONTEXT_GUARDIAN_IMAGE_BASE_URL=//p' "$image_config")
+          image_key_file=$(sed -n 's/^CONTEXT_GUARDIAN_IMAGE_SIGNING_KEY_FILE=//p' "$image_config")
+          image_cache_dir=$(sed -n 's/^CONTEXT_GUARDIAN_IMAGE_CACHE_DIR=//p' "$image_config")
+          image_ttl=$(sed -n 's/^CONTEXT_GUARDIAN_IMAGE_URL_TTL_SECONDS=//p' "$image_config")
+          case "$image_base_url" in https://*) ;; *) echo "invalid image base URL" >&2; exit 2 ;; esac
+          [ -f "$image_key_file" ] || { echo "missing image signing key" >&2; exit 2; }
+          [ -d "$image_cache_dir" ] || { echo "missing image cache directory" >&2; exit 2; }
+          case "$image_ttl" in ''|*[!0-9]*) echo "invalid image URL TTL" >&2; exit 2 ;; esac
+          image_arguments="<string>--image-base-url</string><string>$(xml_escape "$image_base_url")</string><string>--image-signing-key-file</string><string>$(xml_escape "$image_key_file")</string><string>--image-cache-dir</string><string>$(xml_escape "$image_cache_dir")</string><string>--image-url-ttl-seconds</string><string>$image_ttl</string>"
+        fi
         apply_file=$(mktemp)
         trap 'rm -f "$apply_file"' EXIT HUP INT TERM
-        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' '<plist version="1.0"><dict>' "<key>Label</key><string>$label</string>" '<key>ProgramArguments</key><array>' "<string>$escaped_binary</string>" '<string>--thread-id</string>' "<string>$thread_id</string>" '</array>' '<key>EnvironmentVariables</key><dict>' "<key>CODEX_HOME</key><string>$escaped_home</string>" '</dict>' '<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>' "<key>StandardOutPath</key><string>$escaped_log/$thread_id.out.log</string>" "<key>StandardErrorPath</key><string>$escaped_log/$thread_id.err.log</string>" '</dict></plist>' > "$apply_file"
-        cp "$apply_file" "$plist"
+        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' '<plist version="1.0"><dict>' "<key>Label</key><string>$label</string>" '<key>ProgramArguments</key><array>' "<string>$escaped_binary</string>" '<string>--thread-id</string>' "<string>$thread_id</string>" "$image_arguments" '</array>' '<key>EnvironmentVariables</key><dict>' "<key>CODEX_HOME</key><string>$escaped_home</string>" '</dict>' '<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>' "<key>StandardOutPath</key><string>$escaped_log/$thread_id.out.log</string>" "<key>StandardErrorPath</key><string>$escaped_log/$thread_id.err.log</string>" '</dict></plist>' > "$apply_file"
+        plutil -lint "$apply_file" >/dev/null
+        install -m 600 "$apply_file" "$plist"
+        if [ "${CONTEXT_GUARDIAN_DRY_RUN:-0}" = 1 ]; then
+          echo "validated $label"
+          exit 0
+        fi
         launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
         launchctl bootstrap "gui/$(id -u)" "$plist"
         echo "installed $label"

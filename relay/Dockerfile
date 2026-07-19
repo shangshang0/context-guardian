@@ -1,4 +1,4 @@
-FROM rust:1-bookworm AS build
+FROM rust:1.97-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
@@ -8,7 +8,6 @@ FROM debian:bookworm-slim
 RUN groupadd --system --gid 65532 relay && useradd --system --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin relay
 COPY --from=build /src/target/release/context-relay-server /usr/local/bin/context-relay-server
 ENV CONTEXT_RELAY_LISTEN=0.0.0.0:8080
-ENV CONTEXT_RELAY_TENANT_STORE=/data/tenants.json
 EXPOSE 8080
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/context-relay-server"]

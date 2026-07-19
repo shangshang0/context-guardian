@@ -1,10 +1,11 @@
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, Response, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use context_relay::{
-    secret_hash, valid_image_path, valid_secret, valid_tenant_id, PollResponse, RegisterRequest,
+    secret_hash, secret_hash_matches, tenant_id_for_secret, valid_image_path,
+    valid_registration_proof, valid_secret, valid_tenant_id, PollResponse, RegisterRequest,
     RelayResult, MAX_IMAGE_BYTES,
 };
 use rand::RngCore;
@@ -40,7 +41,7 @@ struct Inflight {
 struct AppState {
     tenants: Arc<RwLock<HashMap<String, Arc<Tenant>>>>,
     inflight: Arc<Mutex<HashMap<String, Inflight>>>,
-    tenant_store: PathBuf,
+    tenant_store: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -59,11 +60,12 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     let listen = env::var("CONTEXT_RELAY_LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let tenant_store = PathBuf::from(
-        env::var("CONTEXT_RELAY_TENANT_STORE").unwrap_or_else(|_| "/data/tenants.json".to_string()),
-    );
+    let tenant_store = env::var("CONTEXT_RELAY_TENANT_STORE")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
     let state = AppState {
-        tenants: Arc::new(RwLock::new(load_tenants(&tenant_store).await?)),
+        tenants: Arc::new(RwLock::new(load_tenants(tenant_store.as_ref()).await?)),
         inflight: Arc::new(Mutex::new(HashMap::new())),
         tenant_store,
     };
@@ -73,6 +75,7 @@ async fn run() -> Result<(), String> {
         .route("/v1/poll/{tenant_id}", post(poll))
         .route("/v1/result/{tenant_id}/{request_id}", post(result))
         .route("/t/{tenant_id}/image/{filename}", get(image))
+        .layer(DefaultBodyLimit::max(MAX_IMAGE_BYTES * 2))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
@@ -88,10 +91,20 @@ async fn register(State(state): State<AppState>, Json(input): Json<RegisterReque
     if !valid_tenant_id(&input.tenant_id) || !valid_secret(&input.tenant_secret) {
         return StatusCode::BAD_REQUEST;
     }
+    if tenant_id_for_secret(&input.tenant_secret) != input.tenant_id {
+        return StatusCode::BAD_REQUEST;
+    }
+    if !valid_registration_proof(
+        &input.tenant_id,
+        &input.tenant_secret,
+        input.registration_nonce,
+    ) {
+        return StatusCode::BAD_REQUEST;
+    }
     let hash = secret_hash(&input.tenant_secret);
     let mut tenants = state.tenants.write().await;
     if let Some(existing) = tenants.get(&input.tenant_id) {
-        return if existing.secret_hash == hash {
+        return if secret_hash_matches(&existing.secret_hash, &input.tenant_secret) {
             StatusCode::NO_CONTENT
         } else {
             StatusCode::CONFLICT
@@ -101,17 +114,18 @@ async fn register(State(state): State<AppState>, Json(input): Json<RegisterReque
         return StatusCode::SERVICE_UNAVAILABLE;
     }
     tenants.insert(
-        input.tenant_id,
+        input.tenant_id.clone(),
         Arc::new(Tenant {
             secret_hash: hash,
             queue: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
         }),
     );
-    if persist_tenants(&state.tenant_store, &tenants)
+    if persist_tenants(state.tenant_store.as_ref(), &tenants)
         .await
         .is_err()
     {
+        tenants.remove(&input.tenant_id);
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
     StatusCode::CREATED
@@ -148,12 +162,17 @@ async fn result(
     {
         return StatusCode::NOT_FOUND;
     }
-    let Some(inflight) = state.inflight.lock().await.remove(&request_id) else {
+    let mut inflight_map = state.inflight.lock().await;
+    let Some(inflight) = inflight_map.get(&request_id) else {
         return StatusCode::NOT_FOUND;
     };
     if inflight.tenant_id != tenant_id {
         return StatusCode::NOT_FOUND;
     }
+    let Some(inflight) = inflight_map.remove(&request_id) else {
+        return StatusCode::NOT_FOUND;
+    };
+    drop(inflight_map);
     let _ = inflight.sender.send(result);
     StatusCode::NO_CONTENT
 }
@@ -169,6 +188,13 @@ async fn image(
     let Some(sig) = query.sig else {
         return hidden_not_found();
     };
+    if expires.len() > 20
+        || !expires.bytes().all(|byte| byte.is_ascii_digit())
+        || sig.len() != 64
+        || !sig.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return hidden_not_found();
+    }
     let path_and_query = format!("/image/{filename}?expires={expires}&sig={sig}");
     if !valid_tenant_id(&tenant_id) || !valid_image_path(&path_and_query) {
         return hidden_not_found();
@@ -202,6 +228,11 @@ async fn image(
     tenant.notify.notify_one();
     let result = tokio::time::timeout(Duration::from_secs(30), receiver).await;
     state.inflight.lock().await.remove(&request_id);
+    tenant
+        .queue
+        .lock()
+        .await
+        .retain(|job| job.request_id != request_id);
     let Ok(Ok(result)) = result else {
         return hidden_not_found();
     };
@@ -243,13 +274,16 @@ async fn authenticate(
         .get(tenant_id)
         .cloned()
         .ok_or(StatusCode::NOT_FOUND)?;
-    if secret_hash(secret) != tenant.secret_hash {
+    if !secret_hash_matches(&tenant.secret_hash, secret) {
         return Err(StatusCode::NOT_FOUND);
     }
     Ok(tenant)
 }
 
-async fn load_tenants(path: &PathBuf) -> Result<HashMap<String, Arc<Tenant>>, String> {
+async fn load_tenants(path: Option<&PathBuf>) -> Result<HashMap<String, Arc<Tenant>>, String> {
+    let Some(path) = path else {
+        return Ok(HashMap::new());
+    };
     let Ok(bytes) = tokio::fs::read(path).await else {
         return Ok(HashMap::new());
     };
@@ -271,9 +305,12 @@ async fn load_tenants(path: &PathBuf) -> Result<HashMap<String, Arc<Tenant>>, St
 }
 
 async fn persist_tenants(
-    path: &PathBuf,
+    path: Option<&PathBuf>,
     tenants: &HashMap<String, Arc<Tenant>>,
 ) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
     let stored: HashMap<&String, &String> = tenants
         .iter()
         .map(|(id, tenant)| (id, &tenant.secret_hash))

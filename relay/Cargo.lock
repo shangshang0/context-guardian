@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "context-relay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64",
@@ -138,6 +138,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "tokio",
 ]
 

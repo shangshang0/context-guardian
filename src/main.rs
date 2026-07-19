@@ -810,7 +810,7 @@ fn open_database(path: &Path) -> io::Result<Connection> {
 }
 
 fn sqlite_error(error: rusqlite::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, error)
+    io::Error::other(error)
 }
 
 fn print_status(config: &Config) -> io::Result<()> {

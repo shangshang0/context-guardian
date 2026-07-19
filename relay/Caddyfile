@@ -1,10 +1,9 @@
 {
-    auto_https off
     admin off
+    email {$CONTEXT_RELAY_ACME_EMAIL}
 }
 
-https://{$CONTEXT_RELAY_DOMAIN}:5003 {
-    tls /certs/relay.crt /certs/relay.key
+{$CONTEXT_RELAY_DOMAIN} {
     encode zstd gzip
 
     @allowed path /healthz /v1/register /v1/poll/* /v1/result/* /t/*/image/*
@@ -18,5 +17,9 @@ https://{$CONTEXT_RELAY_DOMAIN}:5003 {
         Strict-Transport-Security "max-age=31536000"
         Cache-Control "no-store"
         X-Content-Type-Options "nosniff"
+    }
+
+    log {
+        output discard
     }
 }

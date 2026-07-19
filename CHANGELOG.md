@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+- Harden tenant isolation with secret-derived IDs, constant-time authentication, registration proof of work, bounded bodies/queues, and cross-tenant inflight protection.
+- Add atomic identity creation and migration, automatic re-registration after Relay restart, proxy-safe loopback access, and MCP child-output limits.
+- Make launchd generation safe for nonstandard user paths and automatically inject each user's mode-`0600` image publishing configuration into managed guardians.
+- Open-source a self-hosted Docker Relay with automatic HTTPS, no image persistence, no host mounts, pinned runtime images, and documented security boundaries.
+- Validate Skill metadata, MCP contracts, Shell scripts, Docker Compose, Rust Clippy/tests, RustSec advisories, and two-tenant end-to-end GPT image recognition.
+
 ## 0.4.0
 
 - Add an install-and-use multi-tenant Rust Relay client and server for signed image URLs without SSH accounts or inbound home-network ports.
