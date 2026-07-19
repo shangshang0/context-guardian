@@ -40,7 +40,11 @@ const tools = [
         confirm: { type: "boolean", description: "Must be true because recovery mutates local state." },
         trigger_tokens: { type: "integer", minimum: 10000, default: 200000 },
         recovery_tokens: { type: "integer", minimum: 10000, default: 100000 },
-        large_output_bytes: { type: "integer", minimum: 10000, default: 160000 }
+        large_output_bytes: { type: "integer", minimum: 10000, default: 160000 },
+        image_base_url: { type: "string", pattern: "^https://" },
+        image_signing_key_file: { type: "string" },
+        image_cache_dir: { type: "string" },
+        image_url_ttl_seconds: { type: "integer", minimum: 1, maximum: 86400, default: 900 }
       },
       required: ["thread_id", "confirm"],
       additionalProperties: false
@@ -97,13 +101,26 @@ async function callTool(name, input = {}) {
   if (name === "recover_context") {
     if (input.confirm !== true) throw new Error("confirm=true is required for recovery");
     await ensureExecutable(binary);
-    return run(binary, [
+    const args = [
       "--thread-id", threadId,
       "--once",
       "--context-trigger-tokens", String(input.trigger_tokens || 200000),
       "--recovery-tokens", String(input.recovery_tokens || 100000),
       "--large-tool-output-bytes", String(input.large_output_bytes || 160000)
-    ]);
+    ];
+    const imageOptions = [input.image_base_url, input.image_signing_key_file, input.image_cache_dir];
+    if (imageOptions.some(Boolean) && !imageOptions.every(Boolean)) {
+      throw new Error("image_base_url, image_signing_key_file, and image_cache_dir must be provided together");
+    }
+    if (imageOptions.every(Boolean)) {
+      args.push(
+        "--image-base-url", input.image_base_url,
+        "--image-signing-key-file", input.image_signing_key_file,
+        "--image-cache-dir", input.image_cache_dir,
+        "--image-url-ttl-seconds", String(input.image_url_ttl_seconds || 900)
+      );
+    }
+    return run(binary, args);
   }
   if (name === "guardian_service") {
     if (!["install", "remove", "status"].includes(input.action)) throw new Error("invalid action");
@@ -119,7 +136,7 @@ function respond(message) {
 
 async function handle(request) {
   if (request.method === "initialize") {
-    return { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "context-guardian", version: "0.2.1" } };
+    return { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "context-guardian", version: "0.3.0" } };
   }
   if (request.method === "tools/list") return { tools };
   if (request.method === "tools/call") {

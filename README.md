@@ -11,6 +11,7 @@ The default recovery value is `100000` tokens. This is an index recovery value, 
 ## Components
 
 - `context-guardian`: Rust CLI and watchdog.
+- `context-image-gateway`: signed, expiring IPv6 image origin.
 - `mcp/server.mjs`: dependency-free stdio MCP server for agents.
 - `skill/context-guardian`: installable Codex Agent Skill.
 - `scripts/service.sh`: per-task launchd/systemd user service manager.
@@ -80,6 +81,38 @@ Exposed tools:
 - `guardian_service`: install/remove/status for a per-task daemon; mutations require confirmation.
 
 Set `CONTEXT_GUARDIAN_BIN` if the binary is not under `target/release/` relative to the MCP service.
+
+## Optional IPv6 image URLs
+
+OpenAI accepts a fully qualified image URL or a Base64 data URL. To keep scrubbed images readable without retaining Base64 in the rollout, Context Guardian can copy image bytes into an isolated cache and replace the data URI with a short-lived signed HTTPS URL.
+
+This requires a public domain with an AAAA record pointing to the host and a trusted TLS certificate. A naked `http://[IPv6]:port/` URL is intentionally rejected because model-side fetchers may block non-HTTPS or literal-IP origins.
+
+Create a signing key and start the IPv6 origin:
+
+```sh
+mkdir -p ~/.codex/context-guardian/images
+openssl rand 32 > ~/.codex/context-guardian/image-signing.key
+chmod 600 ~/.codex/context-guardian/image-signing.key
+context-image-gateway \
+  --listen '[::1]:8787' \
+  --cache-dir ~/.codex/context-guardian/images \
+  --signing-key-file ~/.codex/context-guardian/image-signing.key
+```
+
+Put Caddy, Nginx, or another trusted HTTPS reverse proxy in front of the gateway and publish a domain such as `https://images.example.com`. Bind the gateway to `[::]:8787` only after host firewall rules restrict the origin appropriately.
+
+Enable publishing for one guardian:
+
+```sh
+context-guardian --thread-id 019f... \
+  --image-base-url https://images.example.com \
+  --image-signing-key-file ~/.codex/context-guardian/image-signing.key \
+  --image-cache-dir ~/.codex/context-guardian/images \
+  --image-url-ttl-seconds 900
+```
+
+If publishing fails, Guardian safely falls back to an `input_text` placeholder.
 
 ## Recovery behavior
 

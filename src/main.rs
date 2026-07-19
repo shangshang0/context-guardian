@@ -1,5 +1,8 @@
+use base64::Engine;
+use hmac::{Hmac, Mac};
 use rusqlite::{params, Connection};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -17,6 +20,7 @@ const DEFAULT_CC_SWITCH_MODEL: &str = "feature/gpt-5.6-sol";
 const DEFAULT_CC_SWITCH_CHUNK_TARGET_TOKENS: usize = 120_000;
 const CC_SWITCH_MAX_REDUCE_ROUNDS: usize = 4;
 const QUIET_DELAY_MS: u64 = 250;
+const DEFAULT_IMAGE_URL_TTL_SECONDS: u64 = 900;
 
 #[derive(Debug)]
 struct Config {
@@ -35,6 +39,15 @@ struct Config {
     cc_switch_model: String,
     cc_switch_summary: bool,
     cc_switch_chunk_target_tokens: usize,
+    image_publisher: Option<ImagePublisher>,
+}
+
+#[derive(Debug, Clone)]
+struct ImagePublisher {
+    base_url: String,
+    cache_dir: PathBuf,
+    signing_key: Vec<u8>,
+    ttl_seconds: u64,
 }
 
 #[derive(Debug, Default)]
@@ -183,7 +196,12 @@ impl Config {
             cc_switch_model: DEFAULT_CC_SWITCH_MODEL.to_string(),
             cc_switch_summary: false,
             cc_switch_chunk_target_tokens: DEFAULT_CC_SWITCH_CHUNK_TARGET_TOKENS,
+            image_publisher: None,
         };
+        let mut image_base_url = None;
+        let mut image_signing_key_file = None;
+        let mut image_cache_dir = codex_home.join("context-guardian/images");
+        let mut image_url_ttl_seconds = DEFAULT_IMAGE_URL_TTL_SECONDS;
 
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -239,6 +257,24 @@ impl Config {
                 }
                 "--disable-cc-switch-summary" => config.cc_switch_summary = false,
                 "--enable-cc-switch-summary" => config.cc_switch_summary = true,
+                "--image-base-url" => {
+                    image_base_url = Some(next_value(&mut args, "--image-base-url")?)
+                }
+                "--image-signing-key-file" => {
+                    image_signing_key_file = Some(PathBuf::from(next_value(
+                        &mut args,
+                        "--image-signing-key-file",
+                    )?))
+                }
+                "--image-cache-dir" => {
+                    image_cache_dir = PathBuf::from(next_value(&mut args, "--image-cache-dir")?)
+                }
+                "--image-url-ttl-seconds" => {
+                    let value = next_value(&mut args, "--image-url-ttl-seconds")?;
+                    image_url_ttl_seconds = value
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid --image-url-ttl-seconds value: {value}"))?;
+                }
                 "--once" => config.once = true,
                 "--status" => config.status = true,
                 "--help" | "-h" => return Err(help_text()),
@@ -252,7 +288,94 @@ impl Config {
             config.rollout = discover_rollout(&config.state_db, &config.thread_id)
                 .map_err(|error| format!("could not discover rollout: {error}"))?;
         }
+        match (image_base_url, image_signing_key_file) {
+            (Some(base_url), Some(key_file)) => {
+                config.image_publisher = Some(ImagePublisher::new(
+                    base_url,
+                    image_cache_dir,
+                    key_file,
+                    image_url_ttl_seconds,
+                )?);
+            }
+            (None, None) => {}
+            _ => {
+                return Err(
+                    "--image-base-url and --image-signing-key-file must be provided together"
+                        .to_string(),
+                )
+            }
+        }
         Ok(config)
+    }
+}
+
+impl ImagePublisher {
+    fn new(
+        base_url: String,
+        cache_dir: PathBuf,
+        key_file: PathBuf,
+        ttl_seconds: u64,
+    ) -> Result<Self, String> {
+        if !base_url.starts_with("https://") {
+            return Err("--image-base-url must use https://".to_string());
+        }
+        if !(1..=86_400).contains(&ttl_seconds) {
+            return Err("--image-url-ttl-seconds must be between 1 and 86400".to_string());
+        }
+        let signing_key = fs::read(key_file)
+            .map_err(|error| format!("could not read image signing key: {error}"))?;
+        if signing_key.len() < 32 {
+            return Err("image signing key must contain at least 32 bytes".to_string());
+        }
+        Ok(Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            cache_dir,
+            signing_key,
+            ttl_seconds,
+        })
+    }
+
+    fn publish_data_uri(&self, data_uri: &str) -> io::Result<String> {
+        let encoded = data_uri
+            .split_once(',')
+            .map(|(_, value)| value)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid data URI"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let extension = extension_for_mime(&data_image_mime(data_uri));
+        self.publish_bytes(&bytes, extension)
+    }
+
+    fn publish_bytes(&self, bytes: &[u8], extension: &str) -> io::Result<String> {
+        fs::create_dir_all(&self.cache_dir)?;
+        let filename = format!("{}.{}", hex::encode(Sha256::digest(bytes)), extension);
+        let target = self.cache_dir.join(&filename);
+        if !target.exists() {
+            fs::write(target, bytes)?;
+        }
+        let expires = unix_seconds().saturating_add(self.ttl_seconds);
+        let signature = sign_image_path(&self.signing_key, &filename, expires)?;
+        Ok(format!(
+            "{}/image/{filename}?expires={expires}&sig={signature}",
+            self.base_url
+        ))
+    }
+}
+
+fn sign_image_path(key: &[u8], filename: &str, expires: u64) -> io::Result<String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    mac.update(format!("{filename}\n{expires}").as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn extension_for_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
     }
 }
 
@@ -311,7 +434,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
 }
 
 fn help_text() -> String {
-    "Usage: context-guardian --thread-id ID [--status|--once] [--rollout PATH] [--state-db PATH] [--goals-db PATH] [--interval-ms N] [--context-trigger-tokens N] [--recovery-tokens N] [--large-tool-output-bytes N] [--enable-cc-switch-summary] [--cc-switch-url URL] [--cc-switch-model MODEL] [--cc-switch-chunk-target-tokens N]".to_string()
+    "Usage: context-guardian --thread-id ID [--status|--once] [--rollout PATH] [--state-db PATH] [--goals-db PATH] [--interval-ms N] [--context-trigger-tokens N] [--recovery-tokens N] [--large-tool-output-bytes N] [--image-base-url HTTPS_URL --image-signing-key-file FILE --image-cache-dir DIR --image-url-ttl-seconds N] [--enable-cc-switch-summary]".to_string()
 }
 
 fn validate_scope(config: &Config) -> io::Result<()> {
@@ -431,15 +554,22 @@ fn clean_rollout(config: &Config) -> io::Result<CleanStats> {
             stats.removed_data_uri_bytes += removed_user_image_bytes;
         }
 
-        if let Some(removed) =
-            prune_inline_image_output(&mut value, &analysis.tool_calls, &config.thread_id)
-        {
+        if let Some(removed) = prune_inline_image_output(
+            &mut value,
+            &analysis.tool_calls,
+            &config.thread_id,
+            config.image_publisher.as_ref(),
+        ) {
             stats.pruned_image_outputs += 1;
             stats.removed_data_uri_bytes += removed;
         }
 
-        let removed_inline_images =
-            scrub_inline_images(&mut value, &config.thread_id, "unknown image path");
+        let removed_inline_images = scrub_inline_images(
+            &mut value,
+            &config.thread_id,
+            "unknown image path",
+            config.image_publisher.as_ref(),
+        );
         if removed_inline_images > 0 {
             stats.pruned_image_outputs += 1;
             stats.removed_data_uri_bytes += removed_inline_images;
@@ -754,6 +884,7 @@ fn prune_inline_image_output(
     value: &mut Value,
     tool_calls: &HashMap<String, ToolCallInfo>,
     thread_id: &str,
+    publisher: Option<&ImagePublisher>,
 ) -> Option<usize> {
     let payload = value.get_mut("payload")?.as_object_mut()?;
     if payload.get("type")?.as_str()? != "function_call_output" {
@@ -770,11 +901,16 @@ fn prune_inline_image_output(
         .get(&call_id)
         .and_then(|info| info.image_path.as_deref())
         .unwrap_or("unknown image path");
-    let removed = scrub_inline_images(output, thread_id, image_path);
+    let removed = scrub_inline_images(output, thread_id, image_path, publisher);
     (removed > 0).then_some(removed)
 }
 
-fn scrub_inline_images(value: &mut Value, thread_id: &str, image_path: &str) -> usize {
+fn scrub_inline_images(
+    value: &mut Value,
+    thread_id: &str,
+    image_path: &str,
+    publisher: Option<&ImagePublisher>,
+) -> usize {
     match value {
         Value::String(text) => {
             let Some((scrubbed, removed)) = scrub_data_image_text(text, thread_id, image_path)
@@ -791,6 +927,12 @@ fn scrub_inline_images(value: &mut Value, thread_id: &str, image_path: &str) -> 
                 };
                 let replacement = if image_url.starts_with("data:image") {
                     let removed = image_url.len();
+                    if let Some(url) =
+                        publisher.and_then(|publisher| publisher.publish_data_uri(image_url).ok())
+                    {
+                        map.insert("image_url".to_string(), Value::String(url));
+                        return removed;
+                    }
                     Some((
                         image_placeholder(
                             thread_id,
@@ -813,12 +955,12 @@ fn scrub_inline_images(value: &mut Value, thread_id: &str, image_path: &str) -> 
                 }
             }
             map.values_mut()
-                .map(|value| scrub_inline_images(value, thread_id, image_path))
+                .map(|value| scrub_inline_images(value, thread_id, image_path, publisher))
                 .sum()
         }
         Value::Array(items) => items
             .iter_mut()
-            .map(|value| scrub_inline_images(value, thread_id, image_path))
+            .map(|value| scrub_inline_images(value, thread_id, image_path, publisher))
             .sum(),
         _ => 0,
     }
@@ -1365,8 +1507,91 @@ fn unix_seconds() -> u64 {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
 
     const TEST_THREAD_ID: &str = "019f7193-7201-7a91-a2c7-c2653f4b6c78";
+
+    #[test]
+    fn publishes_signed_https_image_urls() {
+        let temp_dir = env::temp_dir().join(format!("context-guardian-test-{}", unix_seconds()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let key_file = temp_dir.join("key");
+        fs::write(&key_file, b"01234567890123456789012345678901").unwrap();
+        let publisher = ImagePublisher::new(
+            "https://images.example.com".to_string(),
+            temp_dir.join("images"),
+            key_file,
+            900,
+        )
+        .unwrap();
+        let url = publisher
+            .publish_data_uri("data:image/png;base64,YWJj")
+            .unwrap();
+        assert!(url.starts_with("https://images.example.com/image/"));
+        assert!(url.contains("expires="));
+        assert!(url.contains("sig="));
+        let files = fs::read_dir(temp_dir.join("images"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(fs::read(files[0].path()).unwrap(), b"abc");
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn preserves_input_image_when_https_publishing_succeeds() {
+        let temp_dir = env::temp_dir().join(format!(
+            "context-guardian-image-output-test-{}",
+            unix_seconds()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let key_file = temp_dir.join("key");
+        fs::write(&key_file, b"01234567890123456789012345678901").unwrap();
+        let publisher = ImagePublisher::new(
+            "https://images.example.com".to_string(),
+            temp_dir.join("images"),
+            key_file,
+            900,
+        )
+        .unwrap();
+        let mut value = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [{"type": "input_image", "image_url": "data:image/png;base64,YWJj", "detail": "high"}]
+            }
+        });
+
+        assert_eq!(
+            prune_inline_image_output(
+                &mut value,
+                &HashMap::new(),
+                TEST_THREAD_ID,
+                Some(&publisher)
+            ),
+            Some("data:image/png;base64,YWJj".len())
+        );
+        let output = &value["payload"]["output"][0];
+        assert_eq!(output["type"], "input_image");
+        assert!(output["image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://images.example.com/image/"));
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_non_https_image_origins() {
+        let result = ImagePublisher::new(
+            "http://[::1]:8787".to_string(),
+            PathBuf::from("/tmp/images"),
+            PathBuf::from("/missing/key"),
+            900,
+        );
+        assert!(result.unwrap_err().contains("https://"));
+    }
 
     #[test]
     fn extracts_view_image_path_from_string_arguments() {
@@ -1406,7 +1631,7 @@ mod tests {
         );
 
         assert_eq!(
-            prune_inline_image_output(&mut value, &tool_calls, TEST_THREAD_ID),
+            prune_inline_image_output(&mut value, &tool_calls, TEST_THREAD_ID, None),
             Some(image_url.len())
         );
         let output = &value["payload"]["output"];
@@ -1435,7 +1660,7 @@ mod tests {
         });
 
         assert_eq!(
-            prune_inline_image_output(&mut value, &HashMap::new(), TEST_THREAD_ID),
+            prune_inline_image_output(&mut value, &HashMap::new(), TEST_THREAD_ID, None),
             Some(1)
         );
         let output = &value["payload"]["output"][0];
@@ -1460,7 +1685,7 @@ mod tests {
         let tool_calls = HashMap::new();
 
         assert_eq!(
-            prune_inline_image_output(&mut value, &tool_calls, TEST_THREAD_ID),
+            prune_inline_image_output(&mut value, &tool_calls, TEST_THREAD_ID, None),
             Some("data:image/png;base64,abc".len())
         );
         let output = value["payload"]["output"].as_str().unwrap();
