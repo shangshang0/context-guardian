@@ -18,4 +18,4 @@ If the counter briefly rises again, an active app-server may still hold an old i
 
 ## Image failures
 
-Image requests may fail because a rollout stores a large `data:image` value or a historical local image reference that gets re-expanded during resume. Token telemetry can look reasonable while the HTTP request body is still too large. Inspect both forms.
+Image requests may fail because a rollout stores a large `data:image` value or a historical local image reference that gets re-expanded during resume. Token telemetry can look reasonable while the HTTP request body is still too large. Scrubbed image items must be converted to `input_text`; never leave placeholder text in an `input_image.image_url` field because the API validates it as a URL.

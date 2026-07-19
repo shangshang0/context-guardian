@@ -85,6 +85,7 @@ Set `CONTEXT_GUARDIAN_BIN` if the binary is not under `target/release/` relative
 
 - Strict single-thread scope and rollout-path validation.
 - Structural placeholders for inline and historical images.
+- Image tool outputs are downgraded to protocol-valid `input_text` items; legacy placeholder values incorrectly stored in `image_url` are migrated automatically.
 - Pruning of oversized tool output; optional trusted CC Switch summarization.
 - Preservation of existing compacted summaries and active history tails.
 - Targeted SQLite counter repair with a five-second busy timeout.

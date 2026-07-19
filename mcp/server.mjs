@@ -119,7 +119,7 @@ function respond(message) {
 
 async function handle(request) {
   if (request.method === "initialize") {
-    return { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "context-guardian", version: "0.2.0" } };
+    return { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "context-guardian", version: "0.2.1" } };
   }
   if (request.method === "tools/list") return { tools };
   if (request.method === "tools/call") {

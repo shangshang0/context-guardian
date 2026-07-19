@@ -401,7 +401,7 @@ fn clean_rollout(config: &Config) -> io::Result<CleanStats> {
         }
 
         if is_high_token_count(&record.value, config.context_trigger_tokens)
-            || is_context_window_alert(&record.value)
+            || is_recoverable_task_error(&record.value)
         {
             stats.dropped_context_alert_lines += 1;
             continue;
@@ -524,7 +524,7 @@ fn analyze_records(records: &[Record], context_trigger_tokens: u64) -> RolloutAn
             .skip(search_start)
             .find_map(|(index, record)| {
                 (is_high_token_count(&record.value, context_trigger_tokens)
-                    || is_context_window_alert(&record.value))
+                    || is_recoverable_task_error(&record.value))
                 .then_some(index)
             });
 
@@ -784,16 +784,49 @@ fn scrub_inline_images(value: &mut Value, thread_id: &str, image_path: &str) -> 
             *text = scrubbed;
             removed
         }
-        Value::Object(map) => map
-            .values_mut()
-            .map(|value| scrub_inline_images(value, thread_id, image_path))
-            .sum(),
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("input_image") {
+                let Some(image_url) = map.get("image_url").and_then(Value::as_str) else {
+                    return 0;
+                };
+                let replacement = if image_url.starts_with("data:image") {
+                    let removed = image_url.len();
+                    Some((
+                        image_placeholder(
+                            thread_id,
+                            image_path,
+                            data_image_mime(image_url),
+                            removed,
+                        ),
+                        removed,
+                    ))
+                } else if is_image_placeholder(image_url) {
+                    Some((image_url.to_string(), 1))
+                } else {
+                    None
+                };
+                if let Some((text, removed)) = replacement {
+                    map.clear();
+                    map.insert("type".to_string(), Value::String("input_text".to_string()));
+                    map.insert("text".to_string(), Value::String(text));
+                    return removed;
+                }
+            }
+            map.values_mut()
+                .map(|value| scrub_inline_images(value, thread_id, image_path))
+                .sum()
+        }
         Value::Array(items) => items
             .iter_mut()
             .map(|value| scrub_inline_images(value, thread_id, image_path))
             .sum(),
         _ => 0,
     }
+}
+
+fn is_image_placeholder(value: &str) -> bool {
+    value.starts_with("[context-guardian:inline-image-placeholder ")
+        || value.starts_with("[codex-context-janitor:inline-image-placeholder ")
 }
 
 fn scrub_data_image_text(text: &str, thread_id: &str, image_path: &str) -> Option<(String, usize)> {
@@ -1274,7 +1307,7 @@ fn estimate_rollout_tokens(records: &[Record], recovery_tokens: u64) -> u64 {
     ((bytes / 4).max(1) as u64).min(recovery_tokens)
 }
 
-fn is_context_window_alert(value: &Value) -> bool {
+fn is_recoverable_task_error(value: &Value) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("event_msg") {
         return false;
     }
@@ -1301,6 +1334,8 @@ fn is_context_window_alert(value: &Value) -> bool {
         || message.contains("context window")
         || message.contains("exceeds the context")
         || message.contains("input exceeds")
+        || (message.contains("image_url")
+            && (message.contains("invalid format") || message.contains("valid url")))
 }
 
 fn preview(input: &str, max_chars: usize) -> String {
@@ -1376,12 +1411,40 @@ mod tests {
         );
         let output = &value["payload"]["output"];
         assert!(output.is_array());
-        assert_eq!(output[0]["type"], "input_image");
-        assert_eq!(output[0]["detail"], "high");
-        let image_url = output[0]["image_url"].as_str().unwrap();
-        assert!(image_url.contains("inline-image-placeholder"));
-        assert!(image_url.contains("/tmp/page.png"));
-        assert!(image_url.contains("removed_bytes=25"));
+        assert_eq!(output[0]["type"], "input_text");
+        assert!(output[0].get("image_url").is_none());
+        let text = output[0]["text"].as_str().unwrap();
+        assert!(text.contains("inline-image-placeholder"));
+        assert!(text.contains("/tmp/page.png"));
+        assert!(text.contains("removed_bytes=25"));
+    }
+
+    #[test]
+    fn migrates_legacy_invalid_image_placeholders() {
+        let mut value = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [{
+                    "type": "input_image",
+                    "image_url": "[codex-context-janitor:inline-image-placeholder thread=test mime=image/png removed_bytes=25 original_file=/tmp/page.png]",
+                    "detail": "high"
+                }]
+            }
+        });
+
+        assert_eq!(
+            prune_inline_image_output(&mut value, &HashMap::new(), TEST_THREAD_ID),
+            Some(1)
+        );
+        let output = &value["payload"]["output"][0];
+        assert_eq!(output["type"], "input_text");
+        assert!(output.get("image_url").is_none());
+        assert!(output["text"]
+            .as_str()
+            .unwrap()
+            .contains("inline-image-placeholder"));
     }
 
     #[test]
@@ -1461,7 +1524,22 @@ mod tests {
             }
         });
 
-        assert!(is_context_window_alert(&value));
+        assert!(is_recoverable_task_error(&value));
+    }
+
+    #[test]
+    fn detects_invalid_image_url_errors() {
+        let value = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "error": {
+                    "message": "Invalid 'input[327].content[2].image_url'. Expected a valid URL, but got a value with an invalid format."
+                }
+            }
+        });
+
+        assert!(is_recoverable_task_error(&value));
     }
 
     #[test]
