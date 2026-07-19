@@ -15,6 +15,7 @@ const defaultBinary = process.platform === "win32"
   : join(root, "target", "release", "context-guardian");
 const binary = process.env.CONTEXT_GUARDIAN_BIN || (process.env.CONTEXT_GUARDIAN_INSTALLED === "1" ? installedSibling : defaultBinary);
 const serviceScript = process.env.CONTEXT_GUARDIAN_SERVICE_SCRIPT || join(root, "scripts", "service.sh");
+const relayClientScript = process.env.CONTEXT_RELAY_CLIENT_SCRIPT || join(root, "scripts", "relay-client.sh");
 
 const tools = [
   {
@@ -63,6 +64,20 @@ const tools = [
       required: ["action", "thread_id"],
       additionalProperties: false
     }
+  },
+  {
+    name: "relay_client_service",
+    description: "Install, remove, or inspect the optional public Relay client. First start generates a private per-user identity automatically.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["install", "remove", "status"] },
+        relay_url: { type: "string", pattern: "^https://" },
+        confirm: { type: "boolean", description: "Required for install and remove." }
+      },
+      required: ["action"],
+      additionalProperties: false
+    }
   }
 ];
 
@@ -93,12 +108,13 @@ function run(command, args) {
 }
 
 async function callTool(name, input = {}) {
-  const threadId = validateThreadId(input.thread_id);
   if (name === "inspect_context") {
+    const threadId = validateThreadId(input.thread_id);
     await ensureExecutable(binary);
     return run(binary, ["--thread-id", threadId, "--status", "--context-trigger-tokens", String(input.trigger_tokens || 200000)]);
   }
   if (name === "recover_context") {
+    const threadId = validateThreadId(input.thread_id);
     if (input.confirm !== true) throw new Error("confirm=true is required for recovery");
     await ensureExecutable(binary);
     const args = [
@@ -123,9 +139,18 @@ async function callTool(name, input = {}) {
     return run(binary, args);
   }
   if (name === "guardian_service") {
+    const threadId = validateThreadId(input.thread_id);
     if (!["install", "remove", "status"].includes(input.action)) throw new Error("invalid action");
     if (input.action !== "status" && input.confirm !== true) throw new Error("confirm=true is required for service changes");
     return run("sh", [serviceScript, input.action, threadId, binary]);
+  }
+  if (name === "relay_client_service") {
+    if (!["install", "remove", "status"].includes(input.action)) throw new Error("invalid action");
+    if (input.action !== "status" && input.confirm !== true) throw new Error("confirm=true is required for service changes");
+    if (input.action === "install" && (typeof input.relay_url !== "string" || !input.relay_url.startsWith("https://"))) {
+      throw new Error("relay_url using https:// is required for install");
+    }
+    return run("sh", [relayClientScript, input.action, input.relay_url || ""]);
   }
   throw new Error(`unknown tool: ${name}`);
 }
@@ -136,7 +161,7 @@ function respond(message) {
 
 async function handle(request) {
   if (request.method === "initialize") {
-    return { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "context-guardian", version: "0.3.0" } };
+    return { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "context-guardian", version: "0.4.0" } };
   }
   if (request.method === "tools/list") return { tools };
   if (request.method === "tools/call") {

@@ -1,0 +1,49 @@
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - relay-tenants:/data
+    expose:
+      - "8080"
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "2"
+  https:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 96m
+    cpus: 0.5
+    depends_on: ["relay"]
+    ports:
+      - "5003:5003"
+    tmpfs:
+      - /config:size=8m,mode=0700
+      - /data:size=8m,mode=0700
+      - /tmp:size=8m,mode=1777
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  relay-tenants:

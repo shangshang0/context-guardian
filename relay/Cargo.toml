@@ -1,0 +1,23 @@
+[package]
+name = "context-relay"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.8"
+base64 = "0.22"
+hex = "0.4"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs", "net", "signal"] }
+
+[[bin]]
+name = "context-relay-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "context-relay-client"
+path = "src/bin/client.rs"

@@ -1,0 +1,22 @@
+{
+    auto_https off
+    admin off
+}
+
+https://{$CONTEXT_RELAY_DOMAIN}:5003 {
+    tls /certs/relay.crt /certs/relay.key
+    encode zstd gzip
+
+    @allowed path /healthz /v1/register /v1/poll/* /v1/result/* /t/*/image/*
+    handle @allowed {
+        reverse_proxy relay:8080
+    }
+    respond 404
+
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000"
+        Cache-Control "no-store"
+        X-Content-Type-Options "nosniff"
+    }
+}

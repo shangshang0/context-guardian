@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- Add an install-and-use multi-tenant Rust Relay client and server for signed image URLs without SSH accounts or inbound home-network ports.
+- Generate independent 128-bit tenant IDs and 256-bit tenant secrets automatically; store client identity with mode `0600` and only secret hashes on the Relay.
+- Isolate tenant queues and credentials, return uniform `404` responses for cross-tenant access and scans, and enforce global/per-tenant limits.
+- Add hardened Docker deployment, macOS background services, optional proxy support, MCP management, and an SSH-alias-only self-hosted fallback.
+- Keep network image publishing opt-in for each guardian. The first Relay protocol does not persist images but Relay operators can observe transient bytes; self-host for sensitive images.
+
 ## 0.3.0
 
 - Add optional signed, expiring HTTPS image URLs backed by an IPv6 Rust gateway.
