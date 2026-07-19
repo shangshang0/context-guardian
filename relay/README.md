@@ -1,5 +1,7 @@
 # Context Relay Server
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Self-host the same multi-tenant Relay used by Context Guardian's default public service.
 
 ## Requirements

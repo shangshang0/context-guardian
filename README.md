@@ -1,34 +1,51 @@
 # Context Guardian
 
-Agent-oriented sidecar for inspecting, recovering, and continuously protecting Codex task contexts. It lives entirely in this subdirectory of `shangTools` and operates on one explicit task ID at a time.
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## Why it exists
+Context Guardian is a Rust sidecar for inspecting, recovering, and continuously protecting Codex task contexts. It also provides an optional signed-image bypass that keeps large Base64 image bodies out of rollout history while preserving GPT vision through short-lived HTTPS URLs.
 
-Long-running tasks can become unusable because of stale token counters, context-window failure loops, inline image bodies, historical image attachments, or oversized tool outputs. Context Guardian repairs the persisted rollout and local indexes without proxying model requests or changing global Codex settings.
+## What it solves
 
-The default recovery value is `100000` tokens. This is an index recovery value, not a guarantee that all retained context is semantically useful.
+- Recovers tasks stuck in context-window failure loops.
+- Repairs stale per-task token counters without changing global Codex settings.
+- Removes oversized inline image/Base64 bodies and tool outputs from persisted rollout JSONL.
+- Preserves existing compacted summaries and the active conversation tail.
+- Optionally publishes scrubbed images through a signed, expiring URL.
+- Supports a default public multi-tenant Relay or a fully self-hosted Docker Relay.
 
-## Components
+Context Guardian operates on one explicit task/thread ID at a time. It creates backups before high-value rewrites and fails closed when local Codex paths or schemas do not match expectations.
 
-- `context-guardian`: Rust CLI and watchdog.
-- `context-image-gateway`: signed, expiring IPv6 image origin.
-- `mcp/server.mjs`: dependency-free stdio MCP server for agents.
-- `skill/context-guardian`: installable Codex Agent Skill.
-- `scripts/service.sh`: per-task launchd/systemd user service manager.
-- `scripts/image-tunnel.sh`: optional SSH-alias-only reverse tunnel manager.
-- `relay/`: multi-tenant Relay server and auto-provisioning Rust client.
-- `scripts/install.sh`: local release installer.
+## Architecture
+
+```text
+Codex rollout/state
+        │
+        ▼
+context-guardian ── repairs scoped task state
+        │ optional signed image publishing
+        ▼
+local Rust gateway ([::1]:8787)
+        │ outbound HTTPS polling
+        ▼
+public or self-hosted Relay
+        │ short-lived signed URL
+        ▼
+GPT image fetcher
+```
+
+Images remain in the local cache. The Relay does not persist image bytes. In the current protocol, however, the Relay operator can observe transient image bytes and traffic metadata; self-host the Relay for sensitive images.
 
 ## Requirements
 
-- A current stable Rust toolchain to build from source.
+- Current stable Rust toolchain.
+- macOS for the install-and-use public Relay background services.
+- macOS or Linux for the Guardian CLI and managed Guardian service.
 - Node.js 18+ only when using MCP.
-- Codex local state under `$CODEX_HOME` or `${HOME}/.codex`.
-- macOS or Linux for managed background services. The CLI itself builds on other Rust targets, but service installation is intentionally unsupported there.
+- Codex state under `$CODEX_HOME` or `${HOME}/.codex`.
 
-SQLite is bundled into the Rust binary; users do not need the `sqlite3` command.
+SQLite is bundled into the Rust binary.
 
-## Install
+## Quick start
 
 ```sh
 git clone https://github.com/shangshang0/shangTools.git
@@ -36,7 +53,27 @@ cd shangTools/context-guardian
 ./scripts/install.sh
 ```
 
-## CLI
+On macOS, installation automatically:
+
+1. Builds and installs the Guardian, local image gateway, Relay client, MCP server, and service scripts.
+2. Generates an independent 256-bit tenant secret and 128-bit derived tenant ID.
+3. Stores identity and image signing material in mode-`0600` files.
+4. Starts the loopback-only image gateway and public Relay client.
+5. Writes per-user image publishing values to `$CODEX_HOME/context-guardian/image-publishing.env`.
+
+Network image publishing remains opt-in per guarded task. Disable public Relay setup during installation with:
+
+```sh
+CONTEXT_GUARDIAN_SKIP_PUBLIC_RELAY=1 ./scripts/install.sh
+```
+
+Preview generated launchd configuration without starting services:
+
+```sh
+CONTEXT_GUARDIAN_DRY_RUN=1 ./scripts/install.sh
+```
+
+## Guardian CLI
 
 Inspect without mutation:
 
@@ -50,15 +87,15 @@ Run one scoped recovery pass:
 context-guardian --thread-id 019f... --once
 ```
 
-Run in the foreground as a watchdog:
+Run continuously in the foreground:
 
 ```sh
 context-guardian --thread-id 019f...
 ```
 
-The rollout path is discovered from `state_5.sqlite`. Override `--rollout`, `--state-db`, or `--goals-db` only for advanced/custom layouts.
+The rollout path is discovered from `state_5.sqlite`. Override `--rollout`, `--state-db`, or `--goals-db` only for custom layouts.
 
-## Background service
+## Managed Guardian service
 
 ```sh
 ./scripts/service.sh install 019f... ./target/release/context-guardian
@@ -66,117 +103,130 @@ The rollout path is discovered from `state_5.sqlite`. Override `--rollout`, `--s
 ./scripts/service.sh remove 019f... ./target/release/context-guardian
 ```
 
-This installs a per-user launchd agent on macOS or a systemd user unit on Linux.
+On macOS, `service.sh install` automatically reads the active user's mode-`0600` image publishing configuration and injects the four image arguments. It never reads another user's HOME or identity.
+
+## Image publishing modes
+
+### Default public Relay
+
+The default macOS installation uses the project-operated HTTPS Relay. No SSH account, inbound home-network port, or manual client key is required.
+
+Each client:
+
+- creates its own secret locally;
+- derives its tenant ID from that secret;
+- computes a lightweight registration proof;
+- authenticates polling and responses independently;
+- receives uniform `404` responses for invalid credentials and path scans.
+
+Signed image URLs expire after 900 seconds by default. If publishing fails, Guardian falls back to a protocol-valid text placeholder.
+
+### Self-hosted Docker Relay
+
+The Relay server is fully open source. Deploy it on a trusted public server with your own domain:
+
+```sh
+cd relay
+cp .env.example .env
+# Set CONTEXT_RELAY_DOMAIN and CONTEXT_RELAY_ACME_EMAIL.
+docker compose up -d --build
+```
+
+Caddy obtains and renews HTTPS certificates automatically on ports 80/443. Point clients to it during installation:
+
+```sh
+CONTEXT_RELAY_URL=https://relay.example.com ./scripts/install.sh
+```
+
+See [relay/README.md](relay/README.md) for the complete server deployment and security model.
+
+### SSH alias fallback
+
+Single-user/self-hosted deployments can use a restricted SSH reverse tunnel instead of the multi-tenant Relay:
+
+```sh
+./scripts/image-tunnel.sh install image-relay 5003 28787
+```
+
+`image-relay` must be a plain alias from `~/.ssh/config`. The script rejects raw usernames, hostnames, IP literals, and passwords. Restrict the authorized key with `no-agent-forwarding,no-X11-forwarding,no-pty,permitlisten="0.0.0.0:5003"`.
 
 ## MCP
 
-Build first, then configure an stdio MCP server whose command is:
+Configure the stdio server command:
 
 ```sh
 node /absolute/path/to/shangTools/context-guardian/mcp/server.mjs
 ```
 
-Exposed tools:
+Tools:
 
-- `inspect_context`: read-only status inspection.
-- `recover_context`: one recovery pass; requires `confirm=true`.
-- `guardian_service`: install/remove/status for a per-task daemon; mutations require confirmation.
-- `relay_client_service`: install/remove/status for the optional auto-provisioned public Relay client; mutations require confirmation.
+- `inspect_context`: read-only task inspection.
+- `recover_context`: one scoped recovery; requires `confirm=true`.
+- `guardian_service`: install/remove/status for a per-task service; mutations require confirmation.
+- `relay_client_service`: install/remove/status for the optional Relay client; mutations require confirmation.
 
-Set `CONTEXT_GUARDIAN_BIN` if the binary is not under `target/release/` relative to the MCP service.
+The MCP validates task IDs and image parameters, and kills child processes whose output exceeds 1 MiB.
 
-## Optional signed image URLs
+## Agent Skill
 
-OpenAI accepts a fully qualified image URL or a Base64 data URL. To keep scrubbed images readable without retaining Base64 in the rollout, Context Guardian can copy image bytes into an isolated cache and replace the data URI with a short-lived signed HTTPS URL.
-
-This requires a public HTTPS domain and a trusted TLS certificate. A naked HTTP or literal-IP URL is intentionally rejected because model-side fetchers commonly block those origins. Network publishing remains disabled unless both `--image-base-url` and `--image-signing-key-file` are explicitly supplied.
-
-Create a signing key and start the IPv6 origin:
+The bundled Skill is under `skill/context-guardian`. It guides agents through scoped inspection, recovery, continuous guarding, and safe image publishing. Validate it with:
 
 ```sh
-mkdir -p ~/.codex/context-guardian/images
-openssl rand 32 > ~/.codex/context-guardian/image-signing.key
-chmod 600 ~/.codex/context-guardian/image-signing.key
-context-image-gateway \
-  --listen '[::1]:8787' \
-  --cache-dir ~/.codex/context-guardian/images \
-  --signing-key-file ~/.codex/context-guardian/image-signing.key
+python3 /path/to/skill-creator/scripts/quick_validate.py skill/context-guardian
 ```
 
-Put Caddy, Nginx, or another trusted HTTPS reverse proxy in front of the gateway and publish a domain such as `https://images.example.com`. Keep the Rust gateway on loopback so it cannot expose unrelated local files.
+## Security model
 
-If the local network cannot accept public connections, use a server that you control as a TCP-only SSH relay. Define its address and user under a plain alias in `~/.ssh/config`, install a restricted public key on that server, and never pass an IP address, username, password, or private-key content to the tunnel manager:
+- Exact single-task scope; rollout paths must contain the supplied task ID.
+- Backups before rollout or database rewrites.
+- Loopback-only Rust image gateway.
+- Content-addressed image filenames and HMAC-SHA256 expiry signatures.
+- Independent client identities stored as mode-`0600` files.
+- Secret-derived tenant IDs, registration proof of work, constant-time authentication.
+- Bounded request bodies, queues, inflight requests, memory, CPU, PIDs, and logs.
+- Uniform `404` responses for invalid tenants, credentials, signatures, and scans.
+- Relay Docker container is non-root, read-only, capability-free, and has no host mounts.
+- HTTPS container keeps only `NET_BIND_SERVICE` for ports 80/443.
+
+Read [SECURITY.md](SECURITY.md) before operating a public Relay. Report vulnerabilities privately through GitHub Security Advisories.
+
+## Proxy support
+
+The Relay client supports standard proxy environment variables, including SOCKS:
 
 ```sh
-./scripts/image-tunnel.sh install image-relay 5003 28787
-./scripts/image-tunnel.sh status image-relay 5003 28787
-```
-
-The relay listens on TCP `5003` and forwards encrypted traffic to the local HTTPS proxy on `127.0.0.1:28787`. It does not receive filesystem access or image-cache paths. Restrict the authorized key with `no-agent-forwarding,no-X11-forwarding,no-pty,permitlisten="0.0.0.0:5003"`, allow only that TCP port in the server firewall/security group, and rotate any password that was ever shared in plaintext.
-
-### Install-and-use public Relay mode
-
-For users who do not operate an SSH server, the bundled Rust Relay client generates a 256-bit tenant secret, derives its 128-bit tenant ID, and computes a small registration proof on first start. This prevents another client from claiming the ID without the matching secret and raises the cost of bulk registration abuse. The identity is saved only in a local mode-`0600` file. The Relay stores only the secret hash and never creates an image directory.
-
-```sh
+HTTP_PROXY=http://127.0.0.1:8080 \
+HTTPS_PROXY=http://127.0.0.1:8080 \
+ALL_PROXY=socks5h://127.0.0.1:1080 \
 ./scripts/install.sh
 ```
 
-On macOS the installer enables the public Relay automatically. Set `CONTEXT_GUARDIAN_SKIP_PUBLIC_RELAY=1` to install binaries without network image support, or set `CONTEXT_RELAY_URL` to a self-hosted Relay. The Rust guardian itself remains opt-in: pass the four values written to `~/.codex/context-guardian/image-publishing.env` only to guarded tasks that should preserve image URLs.
-
-Set `CONTEXT_GUARDIAN_DRY_RUN=1` to generate and validate launchd configuration without loading services. This is useful for CI and nonstandard HOME/CODEX_HOME paths.
-
-No SSH account, inbound port, or manually created key is required. Each public image URL contains its tenant ID and the existing short-lived image signature. A different tenant secret cannot poll or submit another tenant's requests; invalid tenants, bad credentials, and scanned image paths all return the same `404` response.
-
-The installer initializes the identity before starting the daemon. Client logs never print the tenant secret and normal daemon startup does not print the tenant ID.
-Standard `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` environment variables are supported, including SOCKS proxies, for networks that filter nonstandard HTTPS ports.
-
-The minimal Relay protocol carries image bytes through server memory and does not persist them. By default tenant hashes are also memory-only; clients re-register automatically after a Relay restart. Operators that need persistent registrations can set `CONTEXT_RELAY_TENANT_STORE` to a writable private file. Deploy `relay/compose.yaml` behind a trusted HTTPS reverse proxy. The container is non-root, read-only, capability-free, resource-limited, and has no host mounts. Sensitive deployments should self-host because the Relay operator can still observe transient image bytes in this first protocol version.
-
-The Relay server is fully open source. See [relay/README.md](relay/README.md) for the Docker self-hosting flow. Users can keep the default public domain or set `CONTEXT_RELAY_URL=https://relay.example.com` during installation.
-
-Enable publishing for one guardian:
-
-```sh
-context-guardian --thread-id 019f... \
-  --image-base-url https://images.example.com \
-  --image-signing-key-file ~/.codex/context-guardian/image-signing.key \
-  --image-cache-dir ~/.codex/context-guardian/images \
-  --image-url-ttl-seconds 900
-```
-
-If publishing fails, Guardian safely falls back to an `input_text` placeholder.
-
-## Recovery behavior
-
-- Strict single-thread scope and rollout-path validation.
-- Structural placeholders for inline and historical images.
-- Image tool outputs are downgraded to protocol-valid `input_text` items; legacy placeholder values incorrectly stored in `image_url` are migrated automatically.
-- Pruning of oversized tool output; optional trusted CC Switch summarization.
-- Preservation of existing compacted summaries and active history tails.
-- Targeted SQLite counter repair with a five-second busy timeout.
-- Backups before image, large-output, history-folding, or normalized-token rewrites.
+Local gateway requests always bypass proxy environment variables.
 
 ## Limitations
 
-- This tool protects persisted state; it cannot reconstruct details already lost from a poor compaction summary.
-- A live app-server can briefly rewrite stale counters. Daemon mode continuously converges them.
-- Codex local schemas may evolve. Scope validation intentionally fails closed when expected files or fields are absent.
+- Recovery cannot recreate details already lost from a poor compaction summary.
+- A live Codex app-server may briefly rewrite stale counters; daemon mode converges them again.
+- Codex local schemas may evolve; unknown layouts fail closed.
+- The public Relay does not persist images, but its operator can observe transient bytes and traffic metadata.
+- Managed Relay client setup is currently macOS-only; the Rust client itself is portable.
 
-## Development
+## Development and release checks
 
 ```sh
 cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test
-cargo build --release
+cargo audit --file Cargo.lock
+
+cargo fmt --check --manifest-path relay/Cargo.toml
+cargo clippy --manifest-path relay/Cargo.toml --all-targets --all-features -- -D warnings
 cargo test --manifest-path relay/Cargo.toml
+cargo audit --file relay/Cargo.lock
+
+shellcheck -x scripts/*.sh skill/context-guardian/scripts/*.sh
 node --check mcp/server.mjs
-sh -n scripts/install.sh
-sh -n scripts/service.sh
-sh -n scripts/image-tunnel.sh
-sh -n scripts/relay-client.sh
-sh -n scripts/setup-public-relay.sh
-python3 /path/to/skill-creator/scripts/quick_validate.py skill/context-guardian
+docker compose -f relay/compose.yaml config
 ```
 
 ## License

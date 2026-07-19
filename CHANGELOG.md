@@ -7,6 +7,7 @@
 - Make launchd generation safe for nonstandard user paths and automatically inject each user's mode-`0600` image publishing configuration into managed guardians.
 - Open-source a self-hosted Docker Relay with automatic HTTPS, no image persistence, no host mounts, pinned runtime images, and documented security boundaries.
 - Validate Skill metadata, MCP contracts, Shell scripts, Docker Compose, Rust Clippy/tests, RustSec advisories, and two-tenant end-to-end GPT image recognition.
+- Rewrite the project and self-hosted Relay documentation with matched English and Simplified Chinese guides, clearer quick starts, deployment choices, threat boundaries, and troubleshooting prerequisites.
 
 ## 0.4.0
 
