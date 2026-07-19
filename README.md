@@ -119,7 +119,7 @@ Each client:
 - authenticates polling and responses independently;
 - receives uniform `404` responses for invalid credentials and path scans.
 
-Signed image URLs expire after 900 seconds by default. If publishing fails, Guardian falls back to a protocol-valid text placeholder.
+Signed image URLs expire after 900 seconds by default. Guardian stores a published image as a protocol-valid `input_text` reference, not a remote `input_image`: current Codex CLI releases reject remote image URLs while rebuilding historical context. Direct API clients or agents may fetch the signed URL explicitly before it expires. If publishing fails, Guardian falls back to a text-only placeholder.
 
 ### Self-hosted Docker Relay
 

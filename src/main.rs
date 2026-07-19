@@ -930,18 +930,27 @@ fn scrub_inline_images(
                     if let Some(url) =
                         publisher.and_then(|publisher| publisher.publish_data_uri(image_url).ok())
                     {
-                        map.insert("image_url".to_string(), Value::String(url));
-                        return removed;
-                    }
-                    Some((
-                        image_placeholder(
-                            thread_id,
-                            image_path,
-                            data_image_mime(image_url),
+                        Some((
+                            published_image_placeholder(
+                                thread_id,
+                                image_path,
+                                data_image_mime(image_url),
+                                removed,
+                                &url,
+                            ),
                             removed,
-                        ),
-                        removed,
-                    ))
+                        ))
+                    } else {
+                        Some((
+                            image_placeholder(
+                                thread_id,
+                                image_path,
+                                data_image_mime(image_url),
+                                removed,
+                            ),
+                            removed,
+                        ))
+                    }
                 } else if is_image_placeholder(image_url) {
                     Some((image_url.to_string(), 1))
                 } else {
@@ -1004,6 +1013,18 @@ fn image_placeholder(
 ) -> String {
     format!(
         "[context-guardian:inline-image-placeholder thread={thread_id} mime={mime} removed_bytes={removed_bytes} original_file={image_path}]"
+    )
+}
+
+fn published_image_placeholder(
+    thread_id: &str,
+    image_path: &str,
+    mime: String,
+    removed_bytes: usize,
+    url: &str,
+) -> String {
+    format!(
+        "[context-guardian:published-image-reference thread={thread_id} mime={mime} removed_bytes={removed_bytes} original_file={image_path} url={url}]"
     )
 }
 
@@ -1540,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_input_image_when_https_publishing_succeeds() {
+    fn converts_published_input_image_to_codex_compatible_text() {
         let temp_dir = env::temp_dir().join(format!(
             "context-guardian-image-output-test-{}",
             unix_seconds()
@@ -1574,11 +1595,12 @@ mod tests {
             Some("data:image/png;base64,YWJj".len())
         );
         let output = &value["payload"]["output"][0];
-        assert_eq!(output["type"], "input_image");
-        assert!(output["image_url"]
+        assert_eq!(output["type"], "input_text");
+        assert!(output.get("image_url").is_none());
+        assert!(output["text"]
             .as_str()
             .unwrap()
-            .starts_with("https://images.example.com/image/"));
+            .contains("url=https://images.example.com/image/"));
         fs::remove_dir_all(temp_dir).unwrap();
     }
 

@@ -28,7 +28,7 @@ Protect one explicit Codex task at a time through the bundled Rust CLI or MCP se
 - Preserve existing `compacted` summaries and the active tail. If no reliable compacted summary exists, warn that old details may not be recoverable.
 - Expect high-value rewrites to create backups under `$CODEX_HOME/context-guardian/backups`.
 - External CC Switch summarization is opt-in. Do not enable it unless the endpoint and model are trusted by the user.
-- Image URL preservation is opt-in. Enable it only with a public `https://` domain backed by trusted TLS and a private signing key. Keep the Rust gateway loopback-only. A remote relay may forward TCP but must not receive cache paths, private keys, passwords, or unrestricted SSH access. Never put a bare IP address or placeholder text into `image_url`.
+- Image URL preservation is opt-in. Enable it only with a public `https://` domain backed by trusted TLS and a private signing key. Keep the Rust gateway loopback-only. A remote relay may forward TCP but must not receive cache paths, private keys, passwords, or unrestricted SSH access. Store published historical images as `input_text` references because Codex CLI rejects remote `input_image` URLs during context rebuilds.
 - Read image publishing arguments from the active user's `$CODEX_HOME/context-guardian/image-publishing.env`; never reuse another user's HOME, identity, cache, or signing key.
 - Stop if rollout discovery fails, the path does not contain the thread ID, JSONL is incomplete, or database filenames are unexpected.
 

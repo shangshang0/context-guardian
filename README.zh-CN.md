@@ -119,7 +119,7 @@ macOS 默认安装会连接项目维护的 HTTPS Relay。用户不需要 SSH 账
 - 独立认证轮询与返回请求；
 - 对错误凭据、错误租户和目录扫描统一返回 `404`。
 
-签名图片 URL 默认 900 秒过期。发布失败时，Guardian 会回退为协议合法的文本占位符。
+签名图片 URL 默认 900 秒过期。Guardian 会把已发布图片保存为协议合法的 `input_text` 引用，而不是远程 `input_image`：当前 Codex CLI 在重建历史上下文时不接受远程图片 URL。直接 API 客户端或 Agent 可在过期前显式获取该签名 URL。发布失败时，Guardian 会回退为纯文本占位符。
 
 ### 自建 Docker Relay
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Store published historical images as lightweight `input_text` references so Codex CLI can resume guarded tasks without rejecting remote `input_image` URLs.
+- Retain the short-lived signed URL for explicit agent or direct API retrieval without restoring Base64 data to rollout history.
+
 ## 0.4.1
 
 - Harden tenant isolation with secret-derived IDs, constant-time authentication, registration proof of work, bounded bodies/queues, and cross-tenant inflight protection.
