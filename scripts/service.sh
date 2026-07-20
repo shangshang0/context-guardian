@@ -53,6 +53,9 @@ case "$(uname -s)" in
           if [ "${CONTEXT_GUARDIAN_MESSAGE_FORMAT_LIVE_PROBE:-0}" = 1 ]; then
             preview_arguments="$preview_arguments<string>--enable-message-format-live-probe</string>"
           fi
+          if [ "${CONTEXT_GUARDIAN_MESSAGE_FORMAT_PASSIVE_CAPTURE:-0}" = 1 ]; then
+            preview_arguments="$preview_arguments<string>--enable-message-format-passive-capture</string>"
+          fi
         fi
         apply_file=$(mktemp)
         trap 'rm -f "$apply_file"' EXIT HUP INT TERM
@@ -86,6 +89,9 @@ case "$(uname -s)" in
           preview_arguments=' --enable-message-format-preview'
           if [ "${CONTEXT_GUARDIAN_MESSAGE_FORMAT_LIVE_PROBE:-0}" = 1 ]; then
             preview_arguments="$preview_arguments --enable-message-format-live-probe"
+          fi
+          if [ "${CONTEXT_GUARDIAN_MESSAGE_FORMAT_PASSIVE_CAPTURE:-0}" = 1 ]; then
+            preview_arguments="$preview_arguments --enable-message-format-passive-capture"
           fi
         fi
         printf '%s\n' '[Unit]' "Description=Context Guardian for $thread_id" '[Service]' "Environment=CODEX_HOME=$quoted_home" "ExecStart=$quoted_binary --thread-id $thread_id$preview_arguments" 'Restart=always' 'RestartSec=2' '[Install]' 'WantedBy=default.target' > "$unit_path"

@@ -1,6 +1,7 @@
 mod message_format;
 
 use base64::Engine;
+use context_guardian::passive_capture::{correlate_reports, PassiveEvidence};
 use hmac::{Hmac, Mac};
 use message_format::{
     diagnose_records, is_task_error, run_live_probe, LiveProbeResult, MessageDiagnosis,
@@ -27,6 +28,7 @@ const CC_SWITCH_MAX_REDUCE_ROUNDS: usize = 4;
 const QUIET_DELAY_MS: u64 = 250;
 const DEFAULT_IMAGE_URL_TTL_SECONDS: u64 = 900;
 const DEFAULT_MESSAGE_FORMAT_PROBE_TIMEOUT_SECONDS: u64 = 60;
+const DEFAULT_MESSAGE_FORMAT_CAPTURE_WINDOW_SECONDS: u64 = 300;
 
 #[derive(Debug)]
 struct Config {
@@ -48,9 +50,12 @@ struct Config {
     image_publisher: Option<ImagePublisher>,
     message_format_preview: bool,
     message_format_live_probe: bool,
+    message_format_passive_capture: bool,
     message_format_probe_command: PathBuf,
     message_format_probe_timeout: Duration,
     message_format_report_dir: PathBuf,
+    message_format_capture_report_dir: PathBuf,
+    message_format_capture_window: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +83,8 @@ struct CleanStats {
     dropped_unknown_error_lines: usize,
     message_probe_attempted: bool,
     message_probe_succeeded: bool,
+    passive_capture_checked: bool,
+    passive_capture_supported_repair: bool,
     message_format_report: Option<PathBuf>,
     backup_path: Option<PathBuf>,
 }
@@ -217,11 +224,19 @@ impl Config {
             image_publisher: None,
             message_format_preview: env_flag("CONTEXT_GUARDIAN_MESSAGE_FORMAT_PREVIEW"),
             message_format_live_probe: env_flag("CONTEXT_GUARDIAN_MESSAGE_FORMAT_LIVE_PROBE"),
+            message_format_passive_capture: env_flag(
+                "CONTEXT_GUARDIAN_MESSAGE_FORMAT_PASSIVE_CAPTURE",
+            ),
             message_format_probe_command: default_codex_probe_command(),
             message_format_probe_timeout: Duration::from_secs(
                 DEFAULT_MESSAGE_FORMAT_PROBE_TIMEOUT_SECONDS,
             ),
             message_format_report_dir: codex_home.join("context-guardian/message-format-reports"),
+            message_format_capture_report_dir: codex_home
+                .join("context-guardian/passive-capture-reports"),
+            message_format_capture_window: Duration::from_secs(
+                DEFAULT_MESSAGE_FORMAT_CAPTURE_WINDOW_SECONDS,
+            ),
         };
         let mut image_base_url = None;
         let mut image_signing_key_file = None;
@@ -284,6 +299,9 @@ impl Config {
                 "--enable-cc-switch-summary" => config.cc_switch_summary = true,
                 "--enable-message-format-preview" => config.message_format_preview = true,
                 "--enable-message-format-live-probe" => config.message_format_live_probe = true,
+                "--enable-message-format-passive-capture" => {
+                    config.message_format_passive_capture = true
+                }
                 "--message-format-probe-command" => {
                     config.message_format_probe_command =
                         PathBuf::from(next_value(&mut args, "--message-format-probe-command")?)
@@ -298,6 +316,19 @@ impl Config {
                 "--message-format-report-dir" => {
                     config.message_format_report_dir =
                         PathBuf::from(next_value(&mut args, "--message-format-report-dir")?)
+                }
+                "--message-format-capture-report-dir" => {
+                    config.message_format_capture_report_dir = PathBuf::from(next_value(
+                        &mut args,
+                        "--message-format-capture-report-dir",
+                    )?)
+                }
+                "--message-format-capture-window-seconds" => {
+                    let value = next_value(&mut args, "--message-format-capture-window-seconds")?;
+                    let seconds = value.parse::<u64>().map_err(|_| {
+                        format!("invalid --message-format-capture-window-seconds value: {value}")
+                    })?;
+                    config.message_format_capture_window = Duration::from_secs(seconds);
                 }
                 "--image-base-url" => {
                     image_base_url = Some(next_value(&mut args, "--image-base-url")?)
@@ -487,7 +518,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
 }
 
 fn help_text() -> String {
-    "Usage: context-guardian --thread-id ID [--status|--once] [--rollout PATH] [--state-db PATH] [--goals-db PATH] [--interval-ms N] [--context-trigger-tokens N] [--recovery-tokens N] [--large-tool-output-bytes N] [--image-base-url HTTPS_URL --image-signing-key-file FILE --image-cache-dir DIR --image-url-ttl-seconds N] [--enable-cc-switch-summary] [--enable-message-format-preview [--enable-message-format-live-probe] [--message-format-probe-command PATH] [--message-format-probe-timeout-seconds N] [--message-format-report-dir DIR]]".to_string()
+    "Usage: context-guardian --thread-id ID [--status|--once] [--rollout PATH] [--state-db PATH] [--goals-db PATH] [--interval-ms N] [--context-trigger-tokens N] [--recovery-tokens N] [--large-tool-output-bytes N] [--image-base-url HTTPS_URL --image-signing-key-file FILE --image-cache-dir DIR --image-url-ttl-seconds N] [--enable-cc-switch-summary] [--enable-message-format-preview [--enable-message-format-live-probe] [--enable-message-format-passive-capture] [--message-format-probe-command PATH] [--message-format-probe-timeout-seconds N] [--message-format-report-dir DIR] [--message-format-capture-report-dir DIR] [--message-format-capture-window-seconds N]]".to_string()
 }
 
 fn env_flag(name: &str) -> bool {
@@ -531,10 +562,22 @@ fn validate_scope(config: &Config) -> io::Result<()> {
             "--enable-message-format-live-probe requires --enable-message-format-preview",
         ));
     }
+    if config.message_format_passive_capture && !config.message_format_preview {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--enable-message-format-passive-capture requires --enable-message-format-preview",
+        ));
+    }
     if !(5..=300).contains(&config.message_format_probe_timeout.as_secs()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "message format probe timeout must be between 5 and 300 seconds",
+        ));
+    }
+    if !(30..=3_600).contains(&config.message_format_capture_window.as_secs()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "message format capture window must be between 30 and 3600 seconds",
         ));
     }
 
@@ -618,10 +661,26 @@ fn clean_rollout(config: &Config) -> io::Result<CleanStats> {
     } else {
         LiveProbeResult::not_requested()
     };
+    let unknown_error_unix_ms = unknown_error_indexes
+        .iter()
+        .filter_map(|index| record_unix_ms(&records[*index].value))
+        .max();
+    let passive_evidence =
+        if config.message_format_passive_capture && !unknown_error_indexes.is_empty() {
+            correlate_reports(
+                &config.message_format_capture_report_dir,
+                unknown_error_unix_ms,
+                config.message_format_capture_window,
+            )
+        } else {
+            PassiveEvidence::not_requested()
+        };
     let apply_message_repairs = message_diagnosis.as_ref().is_some_and(|diagnosis| {
         diagnosis.repaired_records() > 0
             && diagnosis.unrepaired_issues() == 0
             && (!config.message_format_live_probe || message_probe.succeeded)
+            && (!config.message_format_passive_capture
+                || passive_evidence_matches_repairs(diagnosis, &passive_evidence))
     });
     let mut stats = CleanStats::default();
     if let Some(diagnosis) = message_diagnosis.as_ref() {
@@ -633,6 +692,10 @@ fn clean_rollout(config: &Config) -> io::Result<CleanStats> {
     }
     stats.message_probe_attempted = message_probe.attempted;
     stats.message_probe_succeeded = message_probe.succeeded;
+    stats.passive_capture_checked = passive_evidence.attempted;
+    stats.passive_capture_supported_repair = message_diagnosis
+        .as_ref()
+        .is_some_and(|diagnosis| passive_evidence_matches_repairs(diagnosis, &passive_evidence));
     let mut output = String::with_capacity(contents.len());
 
     for (index, record) in records.iter().enumerate() {
@@ -726,6 +789,7 @@ fn clean_rollout(config: &Config) -> io::Result<CleanStats> {
                 &unknown_error_indexes,
                 diagnosis,
                 &message_probe,
+                &passive_evidence,
                 false,
                 None,
             )?);
@@ -753,12 +817,43 @@ fn clean_rollout(config: &Config) -> io::Result<CleanStats> {
             &unknown_error_indexes,
             diagnosis,
             &message_probe,
+            &passive_evidence,
             apply_message_repairs,
             stats.backup_path.as_deref(),
         )?);
     }
     write_same_inode(&config.rollout, output.as_bytes())?;
     Ok(stats)
+}
+
+fn passive_evidence_matches_repairs(
+    diagnosis: &MessageDiagnosis,
+    evidence: &PassiveEvidence,
+) -> bool {
+    evidence.supports_lossless_repair
+        && diagnosis
+            .issues
+            .iter()
+            .filter(|issue| issue.repaired)
+            .all(|issue| {
+                evidence.schema_differences.iter().any(|difference| {
+                    if difference.classification != "lossless_known_transform" {
+                        return false;
+                    }
+                    let path = issue.path.as_str();
+                    (path.ends_with("replacement_history")
+                        && difference.path.ends_with(".replacement_history"))
+                        || (path.ends_with(".content") && difference.path.ends_with(".content"))
+                        || (path.contains(".content[")
+                            && !path.ends_with(".type")
+                            && difference.path.contains(".content[")
+                            && difference.successful_type == "object"
+                            && difference.failing_type == "string")
+                        || (path.ends_with(".arguments") && difference.path.ends_with(".arguments"))
+                        || (path.ends_with(".type") && difference.path.ends_with(".type"))
+                        || (path.ends_with(".output") && difference.path.ends_with(".output"))
+                })
+            })
 }
 
 fn parse_records(contents: &str) -> io::Result<Vec<Record>> {
@@ -869,6 +964,7 @@ fn write_message_format_report(
     unknown_error_indexes: &[usize],
     diagnosis: &MessageDiagnosis,
     probe: &LiveProbeResult,
+    passive_evidence: &PassiveEvidence,
     repairs_applied: bool,
     backup: Option<&Path>,
 ) -> io::Result<PathBuf> {
@@ -912,7 +1008,8 @@ fn write_message_format_report(
         "repaired_records": diagnosis.repaired_records(),
         "repairs_applied": repairs_applied,
         "live_probe": probe.as_json(),
-        "privacy": "schema paths and value types only; message text, credentials, and request bodies are not recorded",
+        "passive_capture": passive_evidence.as_json(),
+        "privacy": "schema paths, value types, safe role/type enums, timestamps, and hashes only; message text, credentials, raw PCAP, and request bodies are not recorded",
         "backup_file": backup.and_then(Path::file_name).and_then(|name| name.to_str()),
     });
     let mut options = OpenOptions::new();
@@ -932,7 +1029,7 @@ fn write_message_format_report(
 
 fn log_stats(stats: &CleanStats) {
     println!(
-        "pruned_image_outputs={} pruned_user_image_attachments={} pruned_large_tool_outputs={} removed_data_uri_bytes={} removed_large_output_bytes={} dropped_context_alert_lines={} folded_obsolete_lines={} normalized_token_counts={} normalized_goal_token_counts={} message_format_issues={} message_format_unrepaired_issues={} repaired_message_records={} dropped_unknown_error_lines={} message_probe_attempted={} message_probe_succeeded={} message_format_report={} backup={}",
+        "pruned_image_outputs={} pruned_user_image_attachments={} pruned_large_tool_outputs={} removed_data_uri_bytes={} removed_large_output_bytes={} dropped_context_alert_lines={} folded_obsolete_lines={} normalized_token_counts={} normalized_goal_token_counts={} message_format_issues={} message_format_unrepaired_issues={} repaired_message_records={} dropped_unknown_error_lines={} message_probe_attempted={} message_probe_succeeded={} passive_capture_checked={} passive_capture_supported_repair={} message_format_report={} backup={}",
         stats.pruned_image_outputs,
         stats.pruned_user_image_attachments,
         stats.pruned_large_tool_outputs,
@@ -948,6 +1045,8 @@ fn log_stats(stats: &CleanStats) {
         stats.dropped_unknown_error_lines,
         stats.message_probe_attempted,
         stats.message_probe_succeeded,
+        stats.passive_capture_checked,
+        stats.passive_capture_supported_repair,
         stats
             .message_format_report
             .as_ref()
@@ -1065,7 +1164,10 @@ fn print_status(config: &Config) -> io::Result<()> {
             "title": title,
             "message_format_preview": config.message_format_preview,
             "message_format_live_probe": config.message_format_live_probe,
+            "message_format_passive_capture": config.message_format_passive_capture,
             "message_format_report_dir": config.message_format_report_dir,
+            "message_format_capture_report_dir": config.message_format_capture_report_dir,
+            "message_format_capture_window_seconds": config.message_format_capture_window.as_secs(),
         })
     );
     Ok(())
@@ -1755,6 +1857,87 @@ fn unix_seconds() -> u64 {
         .as_secs()
 }
 
+fn record_unix_ms(value: &Value) -> Option<u64> {
+    let timestamp = value.get("timestamp")?.as_str()?;
+    parse_rfc3339_unix_ms(timestamp)
+}
+
+fn parse_rfc3339_unix_ms(timestamp: &str) -> Option<u64> {
+    let (date, time_and_zone) = timestamp.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i64>().ok()?;
+    let month = date_parts.next()?.parse::<i64>().ok()?;
+    let day = date_parts.next()?.parse::<i64>().ok()?;
+    if date_parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let zone_index = time_and_zone.find('Z').or_else(|| {
+        time_and_zone
+            .char_indices()
+            .skip(1)
+            .find_map(|(index, character)| matches!(character, '+' | '-').then_some(index))
+    })?;
+    let time = &time_and_zone[..zone_index];
+    let zone = &time_and_zone[zone_index..];
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<i64>().ok()?;
+    let minute = time_parts.next()?.parse::<i64>().ok()?;
+    let second_fraction = time_parts.next()?;
+    if time_parts.next().is_some() || hour > 23 || minute > 59 {
+        return None;
+    }
+    let (second_text, fraction_text) = second_fraction
+        .split_once('.')
+        .map_or((second_fraction, ""), |parts| parts);
+    let second = second_text.parse::<i64>().ok()?;
+    if second > 60 {
+        return None;
+    }
+    let mut millis_text = fraction_text.chars().take(3).collect::<String>();
+    while millis_text.len() < 3 {
+        millis_text.push('0');
+    }
+    let millis = if millis_text.is_empty() {
+        0
+    } else {
+        millis_text.parse::<i64>().ok()?
+    };
+    let zone_offset_seconds = if zone == "Z" {
+        0
+    } else {
+        let sign = if zone.starts_with('+') {
+            1
+        } else if zone.starts_with('-') {
+            -1
+        } else {
+            return None;
+        };
+        let mut parts = zone[1..].split(':');
+        let zone_hour = parts.next()?.parse::<i64>().ok()?;
+        let zone_minute = parts.next()?.parse::<i64>().ok()?;
+        if parts.next().is_some() || zone_hour > 23 || zone_minute > 59 {
+            return None;
+        }
+        sign * (zone_hour * 3_600 + zone_minute * 60)
+    };
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 {
+        adjusted_year
+    } else {
+        adjusted_year - 399
+    } / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(hour * 3_600 + minute * 60 + second)?
+        .checked_sub(zone_offset_seconds)?;
+    u64::try_from(seconds.checked_mul(1_000)?.checked_add(millis)?).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2034,6 +2217,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_rfc3339_timestamps_for_capture_correlation() {
+        assert_eq!(
+            parse_rfc3339_unix_ms("1970-01-01T08:00:01.250+08:00"),
+            Some(1_250)
+        );
+        assert_eq!(parse_rfc3339_unix_ms("1970-01-01T00:00:01Z"), Some(1_000));
+    }
+
+    #[test]
+    fn passive_evidence_must_match_each_rollout_repair() {
+        let diagnosis = MessageDiagnosis {
+            checked_records: 1,
+            issues: vec![message_format::FormatIssue {
+                record_index: 0,
+                path: "payload.arguments".to_string(),
+                expected: "JSON encoded as a string".to_string(),
+                actual: "object".to_string(),
+                repaired: true,
+            }],
+            repaired_values: HashMap::new(),
+        };
+        let evidence = PassiveEvidence {
+            attempted: true,
+            supports_lossless_repair: true,
+            status: "lossless_schema_delta".to_string(),
+            failed_request_at_unix_ms: Some(2),
+            baseline_request_at_unix_ms: Some(1),
+            schema_differences: vec![context_guardian::passive_capture::SchemaDifference {
+                path: "$.input[0].content".to_string(),
+                successful_type: "array".to_string(),
+                failing_type: "string".to_string(),
+                classification: "lossless_known_transform".to_string(),
+            }],
+        };
+        assert!(!passive_evidence_matches_repairs(&diagnosis, &evidence));
+    }
+
+    #[test]
     fn detects_inline_images_inside_string_outputs() {
         let value = json!("prefix data:image/png;base64,abcdef suffix");
 
@@ -2098,9 +2319,12 @@ mod tests {
             image_publisher: None,
             message_format_preview: true,
             message_format_live_probe: false,
+            message_format_passive_capture: false,
             message_format_probe_command: PathBuf::from("codex"),
             message_format_probe_timeout: Duration::from_secs(60),
             message_format_report_dir: temp_dir.join("reports"),
+            message_format_capture_report_dir: temp_dir.join("capture-reports"),
+            message_format_capture_window: Duration::from_secs(300),
         };
 
         let stats = clean_rollout(&config).unwrap();

@@ -4,6 +4,8 @@
 
 - Add an opt-in message-format recovery preview that diagnoses unknown task failures, validates compacted/request message envelopes, writes privacy-preserving schema diffs, and applies only lossless repairs after backup.
 - Add an optional ephemeral live Codex probe using the current user environment; when enabled, safe automatic repair requires a successful probe and never captures raw TLS requests, credentials, or message bodies.
+- Add an opt-in passive loopback capture sidecar for exact Codex-to-local-provider request schemas without changing Provider, Base URL, configuration, process state, or routing. Raw bounded PCAPs are mode `0600` and deleted after schema-only extraction.
+- Correlate failed wire requests with prior successful baselines using timestamps and hashed identifiers, and fail closed unless every relevant schema delta is a known lossless transformation.
 - Store published historical images as lightweight `input_text` references so Codex CLI can resume guarded tasks without rejecting remote `input_image` URLs.
 - Retain the short-lived signed URL for explicit agent or direct API retrieval without restoring Base64 data to rollout history.
 

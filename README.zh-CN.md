@@ -56,7 +56,7 @@ cd context-guardian
 
 在 macOS 上，安装脚本会自动：
 
-1. 构建并安装 Guardian、本机图片 Gateway、Relay Client、MCP 和服务脚本。
+1. 构建并安装 Guardian、回环旁路抓包侧车、本机图片 Gateway、Relay Client、MCP 和服务脚本。
 2. 为当前用户生成独立的 256-bit 租户密钥和派生出的 128-bit 租户 ID。
 3. 以 `0600` 权限保存身份和图片签名材料。
 4. 启动只监听回环地址的图片 Gateway 与公共 Relay Client。
@@ -118,6 +118,32 @@ context-guardian --thread-id 019f... --once \
 实时探针使用空临时工作目录、禁止写工作区、要求不调用工具，并在结束后丢弃输出。它用于确认当前用户环境能够生成健康请求；不会对 TLS 做中间人抓包，不会捕获认证头，也不会保存原始请求体或消息正文。探针会消耗一次最小模型请求；启用实时探针后，只有探针成功才会自动修复。
 
 应用修复前，Guardian 会备份 rollout，并移除可能导致错误循环的未知失败记录。只包含字段路径和类型的诊断报告以 `0600` 权限写入 `$CODEX_HOME/context-guardian/message-format-reports`，不会包含消息正文或凭据。
+
+### 精确的被动请求抓取
+
+如需对线上真实请求格式做精确比较，请在错误发生前启动可选侧车：
+
+```sh
+./scripts/passive-capture-service.sh install
+
+context-guardian --thread-id 019f... --once \
+  --enable-message-format-preview \
+  --enable-message-format-passive-capture
+```
+
+侧车默认只被动监听 `lo0` 的 TCP `15721` 端口。它不会修改 `~/.codex/config.toml`、Provider、Base URL、环境变量、Codex 进程状态或正常路由。常见 CC Switch 配置的第一段链路是 `Codex -> 明文 HTTP 127.0.0.1:15721 -> CC Switch`，所以无需 TLS 中间人即可看到 Codex 实际发出的精确请求。
+
+每个抓包窗口都有时长和大小上限，侧车默认最多保留 100 份报告。临时 PCAP 权限为 `0600`，只在本机处理，解析后立即删除。持久化的 `0600` 报告只包含精确 JSON 路径/类型、白名单内的 `role`/`type` 枚举、时间戳、大小和 SHA-256 哈希；不会写入 Authorization 或其他请求头值、请求体、响应体、消息标量正文、原始标识符。HTTP/1.1 重组支持 `Content-Length`、chunked 与 gzip。
+
+未知错误发生后，Guardian 会按时间戳、哈希后的请求/轮次标识和目标地址，把最近失败请求与此前成功请求关联。启用抓包证据门控后采取 fail-closed：只有 rollout 修复本身可证明无损，而且线上 schema 差异全部属于已知无损转换时，才会自动修复；缺少证据、没有成功基线或出现歧义差异时都保持 rollout 不变。
+
+三种诊断层次需要区分：
+
+- rollout 推断：校验本地持久化的消息 envelope。
+- 被动回环抓包：记录 Codex 发给本地 Provider 桥接层的精确明文请求。
+- 上游 TLS 检查：只有 CC Switch 在握手时已经导出 TLS 会话密钥，才可能看到它转换后的上游请求；历史 TLS 会话无法事后解密。Guardian 不会为了取密钥而重启、注入或修改 CC Switch/Codex；没有可用密钥时，当前预览不会声称能够看到上游内容。
+
+macOS 后台服务要求当前用户已有 BPF 权限（`tcpdump -D` 必须成功）。其他平台可用操作系统要求的最小抓包 capability 直接运行 `context-guardian-passive-capture --watch`。执行 `./scripts/passive-capture-service.sh remove` 可移除 macOS 侧车，已经生成的纯 schema 报告会保留。
 
 为新安装的后台守护服务启用预览：
 
@@ -199,7 +225,7 @@ node /absolute/path/to/context-guardian/mcp/server.mjs
 
 MCP 会校验任务 ID和图片参数；子进程输出超过 1 MiB时会被终止，避免异常输出耗尽内存。
 
-`recover_context` 还接受预览参数 `message_format_preview`、`message_format_live_probe`、`message_format_probe_timeout_seconds` 和 `message_format_probe_command`；安装 `guardian_service` 时也可以传入两个预览布尔参数。实时探针必须与消息格式预览同时启用。
+`recover_context` 还接受 `message_format_preview`、`message_format_live_probe`、`message_format_passive_capture`、探针设置及抓包报告/时间窗口设置；安装 `guardian_service` 时可传入三个预览布尔参数。`passive_capture_service` 独立管理 macOS 抓包侧车。实时探针与抓包证据门控都必须和消息格式预览同时启用。
 
 ## Agent Skill
 
@@ -243,6 +269,7 @@ ALL_PROXY=socks5h://127.0.0.1:1080 \
 - 活跃 Codex app-server 可能短暂写回旧计数；守护模式会再次收敛。
 - Codex 本地数据结构未来可能变化；未知布局会拒绝修改。
 - 消息格式预览无法重建已经丢失的语义内容，只会修复可证明无损的结构转换。
+- 旁路抓包只能看到侧车运行期间的流量，不能找回过去的明文请求，也不能事后解密过去的 TLS 会话。
 - 公共 Relay 不持久化图片，但运营者能看到瞬时图片字节和流量元数据。
 - Relay Client 的后台服务安装目前仅支持 macOS；Rust Client 本身可跨平台运行。
 

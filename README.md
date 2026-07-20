@@ -56,7 +56,7 @@ cd context-guardian
 
 On macOS, installation automatically:
 
-1. Builds and installs the Guardian, local image gateway, Relay client, MCP server, and service scripts.
+1. Builds and installs the Guardian, passive loopback capture sidecar, local image gateway, Relay client, MCP server, and service scripts.
 2. Generates an independent 256-bit tenant secret and 128-bit derived tenant ID.
 3. Stores identity and image signing material in mode-`0600` files.
 4. Starts the loopback-only image gateway and public Relay client.
@@ -118,6 +118,32 @@ The preview validates compacted `replacement_history`, message roles/content blo
 The live probe is ephemeral, uses an empty temporary working directory, cannot write to the workspace, and is asked not to call tools. Its output is discarded. It confirms that the current user environment can produce a healthy request; it does not MITM TLS, capture authorization headers, or store raw request/message bodies. A probe consumes one minimal model request and must succeed before automatic repair when live probing is enabled.
 
 Before an applied repair, Guardian backs up the rollout and removes the unknown failure record that would otherwise retrigger the broken turn. Schema-only reports are written mode `0600` under `$CODEX_HOME/context-guardian/message-format-reports`; reports contain field paths and value types, never message text or credentials.
+
+### Exact passive request capture
+
+For an exact wire-format comparison, start the opt-in sidecar before the failure occurs:
+
+```sh
+./scripts/passive-capture-service.sh install
+
+context-guardian --thread-id 019f... --once \
+  --enable-message-format-preview \
+  --enable-message-format-passive-capture
+```
+
+The sidecar passively listens on `lo0`, TCP port `15721` by default. It never edits `~/.codex/config.toml`, Provider, Base URL, environment, Codex process state, or routing. In a common CC Switch setup, the relevant first hop is `Codex -> plaintext HTTP 127.0.0.1:15721 -> CC Switch`; this makes the exact Codex request observable without TLS interception.
+
+Capture windows are bounded by time and size, and the sidecar retains at most 100 reports by default. The temporary PCAP is mode `0600`, is processed locally, and is deleted immediately after parsing. Persisted mode-`0600` reports contain only exact JSON paths/types, allowlisted `role`/`type` enums, timestamps, sizes, and SHA-256 hashes. Authorization and other header values, request bodies, response bodies, message scalar values, and raw identifiers are never written to reports. HTTP/1.1 reassembly supports `Content-Length`, chunked transfer coding, and gzip content coding.
+
+On an unknown failure, Guardian correlates the closest failed request with a prior successful request by timestamp, hashed identifiers, and hashed target. Passive-capture gating is fail closed: automatic repair is allowed only when the rollout repair is independently lossless and every relevant wire-schema difference is a known lossless transformation. Missing evidence, no successful baseline, or an ambiguous difference leaves the rollout unchanged.
+
+The three diagnostic levels are distinct:
+
+- Rollout inference validates the local persisted message envelope.
+- Passive loopback capture records the exact plaintext request Codex sent to the local provider bridge.
+- Upstream TLS inspection can show a request transformed by CC Switch only when that process already exported TLS session secrets during the handshake. Past TLS sessions cannot be decrypted afterward. Guardian does not restart, inject into, or change CC Switch/Codex to obtain keys, and the current preview does not claim upstream visibility when keys are unavailable.
+
+The macOS service requires the current user to have BPF access (`tcpdump -D` must succeed). On other platforms, run `context-guardian-passive-capture --watch` with the minimum packet-capture capability required by the OS. Remove the macOS sidecar with `./scripts/passive-capture-service.sh remove`; schema-only reports are retained.
 
 Enable the preview for a newly installed managed service:
 
@@ -199,7 +225,7 @@ Tools:
 
 The MCP validates task IDs and image parameters, and kills child processes whose output exceeds 1 MiB.
 
-`recover_context` also accepts the preview fields `message_format_preview`, `message_format_live_probe`, `message_format_probe_timeout_seconds`, and `message_format_probe_command`. `guardian_service` accepts the two preview booleans during installation. Live probing requires message-format preview to be enabled.
+`recover_context` also accepts the preview fields `message_format_preview`, `message_format_live_probe`, `message_format_passive_capture`, probe settings, and passive-capture report/window settings. `guardian_service` accepts the three preview booleans during installation. `passive_capture_service` manages the macOS sidecar separately. Live probing and passive-capture gating both require message-format preview.
 
 ## Agent Skill
 
@@ -243,6 +269,7 @@ Local gateway requests always bypass proxy environment variables.
 - A live Codex app-server may briefly rewrite stale counters; daemon mode converges them again.
 - Codex local schemas may evolve; unknown layouts fail closed.
 - Message-format preview cannot reconstruct missing semantic content; it repairs only structural transformations that are lossless.
+- Passive capture sees only traffic that occurs while the sidecar is running; it cannot recover a past plaintext request or decrypt a past TLS session.
 - The public Relay does not persist images, but its operator can observe transient bytes and traffic metadata.
 - Managed Relay client setup is currently macOS-only; the Rust client itself is portable.
 

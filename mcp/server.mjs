@@ -14,8 +14,12 @@ const defaultBinary = process.platform === "win32"
   ? join(root, "target", "release", "context-guardian.exe")
   : join(root, "target", "release", "context-guardian");
 const binary = process.env.CONTEXT_GUARDIAN_BIN || (process.env.CONTEXT_GUARDIAN_INSTALLED === "1" ? installedSibling : defaultBinary);
+const passiveCaptureBinary = process.env.CONTEXT_GUARDIAN_PASSIVE_CAPTURE_BIN || (process.env.CONTEXT_GUARDIAN_INSTALLED === "1"
+  ? join(dirname(fileURLToPath(import.meta.url)), "context-guardian-passive-capture")
+  : join(root, "target", "release", "context-guardian-passive-capture"));
 const serviceScript = process.env.CONTEXT_GUARDIAN_SERVICE_SCRIPT || join(root, "scripts", "service.sh");
 const relayClientScript = process.env.CONTEXT_RELAY_CLIENT_SCRIPT || join(root, "scripts", "relay-client.sh");
+const passiveCaptureServiceScript = process.env.CONTEXT_GUARDIAN_PASSIVE_CAPTURE_SERVICE_SCRIPT || join(root, "scripts", "passive-capture-service.sh");
 const MAX_CHILD_OUTPUT_BYTES = 1024 * 1024;
 
 const tools = [
@@ -49,8 +53,11 @@ const tools = [
         image_url_ttl_seconds: { type: "integer", minimum: 1, maximum: 86400, default: 900 },
         message_format_preview: { type: "boolean", default: false, description: "Preview: diagnose and safely normalize damaged message envelopes after unknown task errors." },
         message_format_live_probe: { type: "boolean", default: false, description: "Send one minimal live Codex probe in the current user environment before applying message repairs." },
+        message_format_passive_capture: { type: "boolean", default: false, description: "Require correlated schema-only evidence from the passive loopback sidecar before repair." },
         message_format_probe_timeout_seconds: { type: "integer", minimum: 5, maximum: 300, default: 60 },
-        message_format_probe_command: { type: "string", description: "Optional path to the current user's Codex CLI binary." }
+        message_format_probe_command: { type: "string", description: "Optional path to the current user's Codex CLI binary." },
+        message_format_capture_report_dir: { type: "string" },
+        message_format_capture_window_seconds: { type: "integer", minimum: 30, maximum: 3600, default: 300 }
       },
       required: ["thread_id", "confirm"],
       additionalProperties: false
@@ -66,9 +73,29 @@ const tools = [
         thread_id: { type: "string" },
         confirm: { type: "boolean", description: "Required for install and remove." },
         message_format_preview: { type: "boolean", default: false },
-        message_format_live_probe: { type: "boolean", default: false }
+        message_format_live_probe: { type: "boolean", default: false },
+        message_format_passive_capture: { type: "boolean", default: false }
       },
       required: ["action", "thread_id"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "passive_capture_service",
+    description: "Install, remove, or inspect the read-only macOS loopback packet-capture sidecar. It never changes Codex Provider, Base URL, config, process state, or routing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["install", "remove", "status"] },
+        confirm: { type: "boolean", description: "Required for install and remove." },
+        interface: { type: "string", pattern: "^[A-Za-z0-9_.-]{1,64}$", default: "lo0" },
+        port: { type: "integer", minimum: 1, maximum: 65535, default: 15721 },
+        duration_seconds: { type: "integer", minimum: 1, maximum: 900, default: 60 },
+        max_pcap_bytes: { type: "integer", minimum: 65536, maximum: 268435456, default: 16777216 },
+        max_reports: { type: "integer", minimum: 2, maximum: 10000, default: 100 },
+        report_dir: { type: "string" }
+      },
+      required: ["action"],
       additionalProperties: false
     }
   },
@@ -158,8 +185,8 @@ async function callTool(name, input = {}) {
         "--image-url-ttl-seconds", String(input.image_url_ttl_seconds || 900)
       );
     }
-    if (input.message_format_live_probe && !input.message_format_preview) {
-      throw new Error("message_format_live_probe requires message_format_preview");
+    if ((input.message_format_live_probe || input.message_format_passive_capture) && !input.message_format_preview) {
+      throw new Error("message format live probe and passive capture require message_format_preview");
     }
     if (input.message_format_preview) args.push("--enable-message-format-preview");
     if (input.message_format_live_probe) {
@@ -171,19 +198,43 @@ async function callTool(name, input = {}) {
         args.push("--message-format-probe-command", input.message_format_probe_command);
       }
     }
+    if (input.message_format_passive_capture) {
+      args.push(
+        "--enable-message-format-passive-capture",
+        "--message-format-capture-window-seconds", String(input.message_format_capture_window_seconds || 300)
+      );
+      if (input.message_format_capture_report_dir) {
+        args.push("--message-format-capture-report-dir", input.message_format_capture_report_dir);
+      }
+    }
     return run(binary, args);
   }
   if (name === "guardian_service") {
     const threadId = validateThreadId(input.thread_id);
     if (!["install", "remove", "status"].includes(input.action)) throw new Error("invalid action");
     if (input.action !== "status" && input.confirm !== true) throw new Error("confirm=true is required for service changes");
-    if (input.message_format_live_probe && !input.message_format_preview) {
-      throw new Error("message_format_live_probe requires message_format_preview");
+    if ((input.message_format_live_probe || input.message_format_passive_capture) && !input.message_format_preview) {
+      throw new Error("message format live probe and passive capture require message_format_preview");
     }
     const serviceEnv = {};
     if (input.message_format_preview) serviceEnv.CONTEXT_GUARDIAN_MESSAGE_FORMAT_PREVIEW = "1";
     if (input.message_format_live_probe) serviceEnv.CONTEXT_GUARDIAN_MESSAGE_FORMAT_LIVE_PROBE = "1";
+    if (input.message_format_passive_capture) serviceEnv.CONTEXT_GUARDIAN_MESSAGE_FORMAT_PASSIVE_CAPTURE = "1";
     return run("sh", [serviceScript, input.action, threadId, binary], serviceEnv);
+  }
+  if (name === "passive_capture_service") {
+    if (!["install", "remove", "status"].includes(input.action)) throw new Error("invalid action");
+    if (input.action !== "status" && input.confirm !== true) throw new Error("confirm=true is required for service changes");
+    const captureEnv = {
+      CONTEXT_GUARDIAN_PASSIVE_CAPTURE_BIN: passiveCaptureBinary,
+      CONTEXT_GUARDIAN_PASSIVE_CAPTURE_INTERFACE: input.interface || "lo0",
+      CONTEXT_GUARDIAN_PASSIVE_CAPTURE_PORT: String(input.port || 15721),
+      CONTEXT_GUARDIAN_PASSIVE_CAPTURE_SECONDS: String(input.duration_seconds || 60),
+      CONTEXT_GUARDIAN_PASSIVE_CAPTURE_MAX_BYTES: String(input.max_pcap_bytes || 16777216),
+      CONTEXT_GUARDIAN_PASSIVE_CAPTURE_MAX_REPORTS: String(input.max_reports || 100)
+    };
+    if (input.report_dir) captureEnv.CONTEXT_GUARDIAN_PASSIVE_CAPTURE_REPORT_DIR = input.report_dir;
+    return run("sh", [passiveCaptureServiceScript, input.action], captureEnv);
   }
   if (name === "relay_client_service") {
     if (!["install", "remove", "status"].includes(input.action)) throw new Error("invalid action");
