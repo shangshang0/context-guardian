@@ -8,7 +8,7 @@ Self-host the same multi-tenant Relay used by Context Guardian's default public 
 
 - A Linux server with Docker Engine and Compose v2.
 - A public domain whose A/AAAA record points to the server.
-- Inbound TCP ports `80` and `443` open for ACME and HTTPS.
+- Inbound TCP port `80` open for ACME, plus `5003` and/or `5004` for HTTPS.
 
 ## Deploy
 
@@ -16,15 +16,15 @@ Self-host the same multi-tenant Relay used by Context Guardian's default public 
 cp .env.example .env
 # Edit only the domain and ACME contact email.
 docker compose up -d --build
-curl -fsS -o /dev/null -w '%{http_code}\n' https://relay.example.com/healthz
+curl -fsS -o /dev/null -w '%{http_code}\n' https://relay.example.com:5003/healthz
 ```
 
-The expected health status is `204`. Caddy obtains and renews the certificate automatically. The Relay container is non-root, read-only, capability-free, resource-limited, and has no host mounts. The HTTPS container drops all capabilities except `NET_BIND_SERVICE`, which is required for ports 80/443. Image bytes and tenant registrations are memory-only by default.
+The expected health status is `204`. Caddy obtains and renews the certificate automatically. The Relay container is non-root, read-only, capability-free, resource-limited, and has no host mounts. The HTTPS container drops all capabilities except `NET_BIND_SERVICE`, which is required for its internal ports 80/443. Image bytes and tenant registrations are memory-only by default.
 
 Point clients at the self-hosted service during installation:
 
 ```sh
-CONTEXT_RELAY_URL=https://relay.example.com ./scripts/install.sh
+CONTEXT_RELAY_URL=https://relay.example.com:5003 ./scripts/install.sh
 ```
 
 To install binaries without any Relay client, set `CONTEXT_GUARDIAN_SKIP_PUBLIC_RELAY=1`.

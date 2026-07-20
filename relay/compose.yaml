@@ -34,7 +34,8 @@ services:
       CONTEXT_RELAY_ACME_EMAIL: ${CONTEXT_RELAY_ACME_EMAIL:?set CONTEXT_RELAY_ACME_EMAIL}
     ports:
       - "80:80"
-      - "443:443"
+      - "5003:443"
+      - "5004:443"
     tmpfs:
       - /config:size=8m,mode=0700
       - /tmp:size=8m,mode=1777

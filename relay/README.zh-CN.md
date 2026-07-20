@@ -8,7 +8,7 @@
 
 - 一台安装 Docker Engine 和 Compose v2 的 Linux 服务器。
 - 一个 A/AAAA记录指向该服务器的公网域名。
-- 开放 TCP `80` 和 `443`，用于 ACME 和 HTTPS。
+- 开放 TCP `80` 用于 ACME，并开放 `5003` 和/或 `5004` 用于 HTTPS。
 
 ## 部署
 
@@ -16,15 +16,15 @@
 cp .env.example .env
 # 只需要修改域名和 ACME 联系邮箱。
 docker compose up -d --build
-curl -fsS -o /dev/null -w '%{http_code}\n' https://relay.example.com/healthz
+curl -fsS -o /dev/null -w '%{http_code}\n' https://relay.example.com:5003/healthz
 ```
 
-健康检查预期返回 `204`。Caddy 会自动申请和续签证书。Relay 容器以非 root、只读、无 capabilities、资源受限、无宿主挂载方式运行。HTTPS 容器仅保留绑定 80/443所需的 `NET_BIND_SERVICE`。图片字节和租户注册默认只存在内存中。
+健康检查预期返回 `204`。Caddy 会自动申请和续签证书。Relay 容器以非 root、只读、无 capabilities、资源受限、无宿主挂载方式运行。HTTPS 容器仅保留绑定容器内部 80/443 所需的 `NET_BIND_SERVICE`。图片字节和租户注册默认只存在内存中。
 
 安装客户端时指定自建服务：
 
 ```sh
-CONTEXT_RELAY_URL=https://relay.example.com ./scripts/install.sh
+CONTEXT_RELAY_URL=https://relay.example.com:5003 ./scripts/install.sh
 ```
 
 如果只安装二进制、不启用任何 Relay Client：
