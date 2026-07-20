@@ -96,6 +96,39 @@ context-guardian --thread-id 019f...
 
 rollout 路径默认从 `state_5.sqlite` 自动发现。只有自定义 Codex 布局时才需要覆盖 `--rollout`、`--state-db` 或 `--goals-db`。
 
+## API 辅助工具输出压缩
+
+Guardian 可以调用受信任的 OpenAI 兼容 API，把过大的历史工具输出压缩成摘要，而不是只留下通用裁剪提示。由于选定的 API 会收到原始工具输出，此能力默认关闭：
+
+```sh
+context-guardian --thread-id 019f... --once \
+  --enable-cc-switch-summary
+```
+
+默认使用本机 CC Switch 的端点和模型：
+
+```sh
+context-guardian --thread-id 019f... --once \
+  --enable-cc-switch-summary \
+  --cc-switch-url http://127.0.0.1:15721/v1/chat/completions \
+  --cc-switch-model feature/gpt-5.6-sol \
+  --cc-switch-chunk-target-tokens 120000 \
+  --large-tool-output-bytes 160000
+```
+
+只有达到大小阈值的 `function_call_output` 会发送给 API。内联图片走独立的图片清理流程，不会进入摘要 API。大文本会分块并最多执行四轮归并，提示模型保留路径、命令、错误、测试结果和关键决策。替换前 Guardian 会备份 rollout。若 API 调用失败或响应格式无效，恢复流程会回退为普通裁剪提示，不会把超大正文继续留在上下文中。
+
+请只使用你信任的端点和模型，因为它能看到原始工具输出。端点必须实现 `POST /v1/chat/completions`，单次请求超时为 20 秒。此功能压缩的是超大工具结果，不会重新生成已经缺失的 Codex 压缩摘要，也无法恢复历史中已经丢失的信息。
+
+后台 Guardian 可通过 MCP 的 `guardian_service` 等价字段启用，或在安装服务时传入环境变量：
+
+```sh
+CONTEXT_GUARDIAN_CC_SWITCH_SUMMARY=1 \
+CONTEXT_GUARDIAN_CC_SWITCH_URL=http://127.0.0.1:15721/v1/chat/completions \
+CONTEXT_GUARDIAN_CC_SWITCH_MODEL=feature/gpt-5.6-sol \
+./scripts/service.sh install 019f... ./target/release/context-guardian
+```
+
 ## 消息格式自动恢复预览
 
 遇到未知任务错误时，启用结构校验与安全自动修复：
@@ -221,11 +254,12 @@ node /absolute/path/to/context-guardian/mcp/server.mjs
 - `inspect_context`：只读检查指定任务。
 - `recover_context`：执行一次修复，必须传入 `confirm=true`。
 - `guardian_service`：安装/删除/检查任务守护服务，变更操作需要确认。
+- `passive_capture_service`：安装/删除/检查可选的 macOS 抓包侧车。
 - `relay_client_service`：安装/删除/检查可选 Relay Client，变更操作需要确认。
 
-MCP 会校验任务 ID和图片参数；子进程输出超过 1 MiB时会被终止，避免异常输出耗尽内存。
+MCP 会校验任务 ID、图片参数及 CC Switch 端点/模型设置；子进程输出超过 1 MiB时会被终止，避免异常输出耗尽内存。
 
-`recover_context` 还接受 `message_format_preview`、`message_format_live_probe`、`message_format_passive_capture`、探针设置及抓包报告/时间窗口设置；安装 `guardian_service` 时可传入三个预览布尔参数。`passive_capture_service` 独立管理 macOS 抓包侧车。实时探针与抓包证据门控都必须和消息格式预览同时启用。
+`recover_context` 与 `guardian_service` 都暴露 `cc_switch_summary`、`cc_switch_url`、`cc_switch_model`、`cc_switch_chunk_target_tokens` 和大输出阈值。`recover_context` 还接受 `message_format_preview`、`message_format_live_probe`、`message_format_passive_capture`、探针设置及抓包报告/时间窗口设置；安装 `guardian_service` 时可传入三个预览布尔参数。`passive_capture_service` 独立管理 macOS 抓包侧车。实时探针与抓包证据门控都必须和消息格式预览同时启用。
 
 ## Agent Skill
 

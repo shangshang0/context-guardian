@@ -96,6 +96,39 @@ context-guardian --thread-id 019f...
 
 The rollout path is discovered from `state_5.sqlite`. Override `--rollout`, `--state-db`, or `--goals-db` only for custom layouts.
 
+## API-assisted tool-output compression
+
+Guardian can use a trusted OpenAI-compatible API to summarize oversized historical tool outputs instead of replacing them with a generic pruning notice. This is opt-in because the selected endpoint receives the original tool output:
+
+```sh
+context-guardian --thread-id 019f... --once \
+  --enable-cc-switch-summary
+```
+
+The defaults target the local CC Switch endpoint and model:
+
+```sh
+context-guardian --thread-id 019f... --once \
+  --enable-cc-switch-summary \
+  --cc-switch-url http://127.0.0.1:15721/v1/chat/completions \
+  --cc-switch-model feature/gpt-5.6-sol \
+  --cc-switch-chunk-target-tokens 120000 \
+  --large-tool-output-bytes 160000
+```
+
+Only `function_call_output` records at or above the size threshold are sent. Inline image outputs use the separate image-cleanup path and are not summarized. Large text is split and reduced for at most four rounds while asking the model to preserve paths, commands, errors, test results, and decisions. Guardian backs up the rollout before replacement. If the API request fails or returns an invalid response, recovery continues with the ordinary pruning notice rather than leaving the oversized body in context.
+
+Use only an endpoint and model you trust with the original output. The endpoint must implement `POST /v1/chat/completions`; each request has a 20-second timeout. This feature compresses oversized tool results—it does not regenerate a missing Codex compaction summary or reconstruct information already lost from history.
+
+For a managed Guardian, set the equivalent MCP `guardian_service` fields or install with environment variables:
+
+```sh
+CONTEXT_GUARDIAN_CC_SWITCH_SUMMARY=1 \
+CONTEXT_GUARDIAN_CC_SWITCH_URL=http://127.0.0.1:15721/v1/chat/completions \
+CONTEXT_GUARDIAN_CC_SWITCH_MODEL=feature/gpt-5.6-sol \
+./scripts/service.sh install 019f... ./target/release/context-guardian
+```
+
 ## Message format recovery preview
 
 Enable structural validation and safe automatic repair after an unknown task error:
@@ -221,11 +254,12 @@ Tools:
 - `inspect_context`: read-only task inspection.
 - `recover_context`: one scoped recovery; requires `confirm=true`.
 - `guardian_service`: install/remove/status for a per-task service; mutations require confirmation.
+- `passive_capture_service`: install/remove/status for the optional macOS packet-capture sidecar.
 - `relay_client_service`: install/remove/status for the optional Relay client; mutations require confirmation.
 
-The MCP validates task IDs and image parameters, and kills child processes whose output exceeds 1 MiB.
+The MCP validates task IDs, image parameters, and CC Switch endpoint/model settings, and kills child processes whose output exceeds 1 MiB.
 
-`recover_context` also accepts the preview fields `message_format_preview`, `message_format_live_probe`, `message_format_passive_capture`, probe settings, and passive-capture report/window settings. `guardian_service` accepts the three preview booleans during installation. `passive_capture_service` manages the macOS sidecar separately. Live probing and passive-capture gating both require message-format preview.
+`recover_context` and `guardian_service` expose `cc_switch_summary`, `cc_switch_url`, `cc_switch_model`, `cc_switch_chunk_target_tokens`, and the large-output threshold. `recover_context` also accepts the preview fields `message_format_preview`, `message_format_live_probe`, `message_format_passive_capture`, probe settings, and passive-capture report/window settings. `guardian_service` accepts the three preview booleans during installation. `passive_capture_service` manages the macOS sidecar separately. Live probing and passive-capture gating both require message-format preview.
 
 ## Agent Skill
 

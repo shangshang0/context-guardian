@@ -47,6 +47,10 @@ const tools = [
         trigger_tokens: { type: "integer", minimum: 10000, default: 200000 },
         recovery_tokens: { type: "integer", minimum: 10000, default: 100000 },
         large_output_bytes: { type: "integer", minimum: 10000, default: 160000 },
+        cc_switch_summary: { type: "boolean", default: false, description: "Send oversized tool outputs to a trusted OpenAI-compatible API for map-reduce summarization before pruning." },
+        cc_switch_url: { type: "string", pattern: "^https?://", default: "http://127.0.0.1:15721/v1/chat/completions" },
+        cc_switch_model: { type: "string", minLength: 1, default: "feature/gpt-5.6-sol" },
+        cc_switch_chunk_target_tokens: { type: "integer", minimum: 8000, default: 120000 },
         image_base_url: { type: "string", pattern: "^https://" },
         image_signing_key_file: { type: "string" },
         image_cache_dir: { type: "string" },
@@ -72,6 +76,11 @@ const tools = [
         action: { type: "string", enum: ["install", "remove", "status"] },
         thread_id: { type: "string" },
         confirm: { type: "boolean", description: "Required for install and remove." },
+        large_output_bytes: { type: "integer", minimum: 10000, default: 160000 },
+        cc_switch_summary: { type: "boolean", default: false },
+        cc_switch_url: { type: "string", pattern: "^https?://", default: "http://127.0.0.1:15721/v1/chat/completions" },
+        cc_switch_model: { type: "string", minLength: 1, default: "feature/gpt-5.6-sol" },
+        cc_switch_chunk_target_tokens: { type: "integer", minimum: 8000, default: 120000 },
         message_format_preview: { type: "boolean", default: false },
         message_format_live_probe: { type: "boolean", default: false },
         message_format_passive_capture: { type: "boolean", default: false }
@@ -120,6 +129,34 @@ function validateThreadId(value) {
     throw new Error("thread_id must contain only hexadecimal characters and hyphens");
   }
   return value;
+}
+
+function appendCcSwitchArguments(args, input) {
+  if (!input.cc_switch_summary) return;
+  const endpoint = input.cc_switch_url || "http://127.0.0.1:15721/v1/chat/completions";
+  let parsed;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    throw new Error("cc_switch_url must be a valid HTTP or HTTPS URL");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("cc_switch_url must use HTTP or HTTPS");
+  }
+  const model = input.cc_switch_model || "feature/gpt-5.6-sol";
+  if (typeof model !== "string" || model.length === 0 || model.length > 200) {
+    throw new Error("cc_switch_model must contain 1 to 200 characters");
+  }
+  const chunkTarget = input.cc_switch_chunk_target_tokens || 120000;
+  if (!Number.isInteger(chunkTarget) || chunkTarget < 8000) {
+    throw new Error("cc_switch_chunk_target_tokens must be an integer of at least 8000");
+  }
+  args.push(
+    "--enable-cc-switch-summary",
+    "--cc-switch-url", endpoint,
+    "--cc-switch-model", model,
+    "--cc-switch-chunk-target-tokens", String(chunkTarget)
+  );
 }
 
 async function ensureExecutable(path) {
@@ -173,6 +210,7 @@ async function callTool(name, input = {}) {
       "--recovery-tokens", String(input.recovery_tokens || 100000),
       "--large-tool-output-bytes", String(input.large_output_bytes || 160000)
     ];
+    appendCcSwitchArguments(args, input);
     const imageOptions = [input.image_base_url, input.image_signing_key_file, input.image_cache_dir];
     if (imageOptions.some(Boolean) && !imageOptions.every(Boolean)) {
       throw new Error("image_base_url, image_signing_key_file, and image_cache_dir must be provided together");
@@ -216,7 +254,17 @@ async function callTool(name, input = {}) {
     if ((input.message_format_live_probe || input.message_format_passive_capture) && !input.message_format_preview) {
       throw new Error("message format live probe and passive capture require message_format_preview");
     }
-    const serviceEnv = {};
+    const serviceEnv = {
+      CONTEXT_GUARDIAN_LARGE_TOOL_OUTPUT_BYTES: String(input.large_output_bytes || 160000)
+    };
+    if (input.cc_switch_summary) {
+      const ccArgs = [];
+      appendCcSwitchArguments(ccArgs, input);
+      serviceEnv.CONTEXT_GUARDIAN_CC_SWITCH_SUMMARY = "1";
+      serviceEnv.CONTEXT_GUARDIAN_CC_SWITCH_URL = input.cc_switch_url || "http://127.0.0.1:15721/v1/chat/completions";
+      serviceEnv.CONTEXT_GUARDIAN_CC_SWITCH_MODEL = input.cc_switch_model || "feature/gpt-5.6-sol";
+      serviceEnv.CONTEXT_GUARDIAN_CC_SWITCH_CHUNK_TARGET_TOKENS = String(input.cc_switch_chunk_target_tokens || 120000);
+    }
     if (input.message_format_preview) serviceEnv.CONTEXT_GUARDIAN_MESSAGE_FORMAT_PREVIEW = "1";
     if (input.message_format_live_probe) serviceEnv.CONTEXT_GUARDIAN_MESSAGE_FORMAT_LIVE_PROBE = "1";
     if (input.message_format_passive_capture) serviceEnv.CONTEXT_GUARDIAN_MESSAGE_FORMAT_PASSIVE_CAPTURE = "1";
