@@ -32,7 +32,7 @@ large_output_bytes=${CONTEXT_GUARDIAN_LARGE_TOOL_OUTPUT_BYTES:-160000}
 case "$large_output_bytes" in ''|*[!0-9]*) echo "invalid large tool output threshold" >&2; exit 2 ;; esac
 
 cc_switch_enabled=${CONTEXT_GUARDIAN_CC_SWITCH_SUMMARY:-0}
-cc_switch_url=${CONTEXT_GUARDIAN_CC_SWITCH_URL:-http://127.0.0.1:15721/v1/chat/completions}
+cc_switch_url=${CONTEXT_GUARDIAN_CC_SWITCH_URL:-http://127.0.0.1:15721/v1/responses}
 cc_switch_model=${CONTEXT_GUARDIAN_CC_SWITCH_MODEL:-feature/gpt-5.6-sol}
 cc_switch_chunk_tokens=${CONTEXT_GUARDIAN_CC_SWITCH_CHUNK_TARGET_TOKENS:-120000}
 if [ "$cc_switch_enabled" = 1 ]; then

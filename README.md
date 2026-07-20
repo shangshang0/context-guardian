@@ -100,7 +100,7 @@ The defaults target the local CC Switch endpoint and model:
 ```sh
 context-guardian --thread-id 019f... --once \
   --enable-cc-switch-summary \
-  --cc-switch-url http://127.0.0.1:15721/v1/chat/completions \
+  --cc-switch-url http://127.0.0.1:15721/v1/responses \
   --cc-switch-model feature/gpt-5.6-sol \
   --cc-switch-chunk-target-tokens 120000 \
   --large-tool-output-bytes 160000
@@ -108,13 +108,13 @@ context-guardian --thread-id 019f... --once \
 
 Only `function_call_output` records at or above the size threshold are sent. Inline image outputs use the separate image-cleanup path and are not summarized. Large text is split and reduced for at most four rounds while asking the model to preserve paths, commands, errors, test results, and decisions. Guardian backs up the rollout before replacement. If the API request fails or returns an invalid response, recovery continues with the ordinary pruning notice rather than leaving the oversized body in context.
 
-Use only an endpoint and model you trust with the original output. The endpoint must implement `POST /v1/chat/completions`; each request has a 20-second timeout. This feature compresses oversized tool results—it does not regenerate a missing Codex compaction summary or reconstruct information already lost from history.
+Use only an endpoint and model you trust with the original output. Raw Responses (`POST /v1/responses`) is the default. Chat Completions remains supported when the configured URL ends in `/chat/completions`; the sidecar selects the matching request and response schema automatically. Each request has a 20-second timeout. This feature compresses oversized tool results—it does not regenerate a missing Codex compaction summary or reconstruct information already lost from history.
 
 For a managed Guardian, set the equivalent MCP `guardian_service` fields or install with environment variables:
 
 ```sh
 CONTEXT_GUARDIAN_CC_SWITCH_SUMMARY=1 \
-CONTEXT_GUARDIAN_CC_SWITCH_URL=http://127.0.0.1:15721/v1/chat/completions \
+CONTEXT_GUARDIAN_CC_SWITCH_URL=http://127.0.0.1:15721/v1/responses \
 CONTEXT_GUARDIAN_CC_SWITCH_MODEL=feature/gpt-5.6-sol \
 ./scripts/service.sh install 019f... ./target/release/context-guardian
 ```

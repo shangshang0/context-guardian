@@ -100,7 +100,7 @@ context-guardian --thread-id 019f... --once \
 ```sh
 context-guardian --thread-id 019f... --once \
   --enable-cc-switch-summary \
-  --cc-switch-url http://127.0.0.1:15721/v1/chat/completions \
+  --cc-switch-url http://127.0.0.1:15721/v1/responses \
   --cc-switch-model feature/gpt-5.6-sol \
   --cc-switch-chunk-target-tokens 120000 \
   --large-tool-output-bytes 160000
@@ -108,13 +108,13 @@ context-guardian --thread-id 019f... --once \
 
 只有达到大小阈值的 `function_call_output` 会发送给 API。内联图片走独立的图片清理流程，不会进入摘要 API。大文本会分块并最多执行四轮归并，提示模型保留路径、命令、错误、测试结果和关键决策。替换前 Guardian 会备份 rollout。若 API 调用失败或响应格式无效，恢复流程会回退为普通裁剪提示，不会把超大正文继续留在上下文中。
 
-请只使用你信任的端点和模型，因为它能看到原始工具输出。端点必须实现 `POST /v1/chat/completions`，单次请求超时为 20 秒。此功能压缩的是超大工具结果，不会重新生成已经缺失的 Codex 压缩摘要，也无法恢复历史中已经丢失的信息。
+请只使用你信任的端点和模型，因为它能看到原始工具输出。默认使用 Raw Responses（`POST /v1/responses`）。如果配置的 URL 以 `/chat/completions` 结尾，旁路仍兼容 Chat Completions，并会自动选择对应的请求与响应结构。单次请求超时为 20 秒。此功能压缩的是超大工具结果，不会重新生成已经缺失的 Codex 压缩摘要，也无法恢复历史中已经丢失的信息。
 
 后台 Guardian 可通过 MCP 的 `guardian_service` 等价字段启用，或在安装服务时传入环境变量：
 
 ```sh
 CONTEXT_GUARDIAN_CC_SWITCH_SUMMARY=1 \
-CONTEXT_GUARDIAN_CC_SWITCH_URL=http://127.0.0.1:15721/v1/chat/completions \
+CONTEXT_GUARDIAN_CC_SWITCH_URL=http://127.0.0.1:15721/v1/responses \
 CONTEXT_GUARDIAN_CC_SWITCH_MODEL=feature/gpt-5.6-sol \
 ./scripts/service.sh install 019f... ./target/release/context-guardian
 ```

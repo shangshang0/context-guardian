@@ -21,7 +21,7 @@ const DEFAULT_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_CONTEXT_TRIGGER_TOKENS: u64 = 200_000;
 const DEFAULT_RECOVERY_TOKENS: u64 = 100_000;
 const DEFAULT_LARGE_TOOL_OUTPUT_BYTES: usize = 160_000;
-const DEFAULT_CC_SWITCH_URL: &str = "http://127.0.0.1:15721/v1/chat/completions";
+const DEFAULT_CC_SWITCH_URL: &str = "http://127.0.0.1:15721/v1/responses";
 const DEFAULT_CC_SWITCH_MODEL: &str = "feature/gpt-5.6-sol";
 const DEFAULT_CC_SWITCH_CHUNK_TARGET_TOKENS: usize = 120_000;
 const CC_SWITCH_MAX_REDUCE_ROUNDS: usize = 4;
@@ -1607,17 +1607,8 @@ fn map_reduce_summary(original: &str, tool_info: &ToolCallInfo, config: &Config)
 }
 
 fn cc_switch_summarize(prompt: &str, max_tokens: usize, config: &Config) -> Option<String> {
-    let payload = json!({
-        "model": config.cc_switch_model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You summarize oversized Codex context fragments for local recovery. Preserve concrete file paths, commands, errors, test results, and decisions. Be concise and factual."
-            },
-            { "role": "user", "content": prompt }
-        ],
-        "max_tokens": max_tokens
-    });
+    let responses_api = is_responses_endpoint(&config.cc_switch_url);
+    let payload = cc_switch_payload(prompt, max_tokens, &config.cc_switch_model, responses_api);
 
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(20))
@@ -1628,15 +1619,77 @@ fn cc_switch_summarize(prompt: &str, max_tokens: usize, config: &Config) -> Opti
         .send_json(payload)
         .ok()?;
     let response_json: Value = response.into_json().ok()?;
-    let summary = response_json
-        .get("choices")?
-        .get(0)?
-        .get("message")?
-        .get("content")?
-        .as_str()?
-        .trim()
-        .to_string();
+    let summary = parse_cc_switch_summary(&response_json, responses_api)?;
     (!summary.is_empty()).then_some(summary)
+}
+
+const SUMMARY_INSTRUCTIONS: &str = "You summarize oversized Codex context fragments for local recovery. Preserve concrete file paths, commands, errors, test results, and decisions. Be concise and factual.";
+
+fn is_responses_endpoint(url: &str) -> bool {
+    url.split(['?', '#'])
+        .next()
+        .is_some_and(|path| path.trim_end_matches('/').ends_with("/responses"))
+}
+
+fn cc_switch_payload(prompt: &str, max_tokens: usize, model: &str, responses_api: bool) -> Value {
+    if responses_api {
+        json!({
+            "model": model,
+            "instructions": SUMMARY_INSTRUCTIONS,
+            "input": prompt,
+            "max_output_tokens": max_tokens,
+            "stream": false
+        })
+    } else {
+        json!({
+            "model": model,
+            "messages": [
+                { "role": "system", "content": SUMMARY_INSTRUCTIONS },
+                { "role": "user", "content": prompt }
+            ],
+            "max_tokens": max_tokens,
+            "stream": false
+        })
+    }
+}
+
+fn parse_cc_switch_summary(response: &Value, responses_api: bool) -> Option<String> {
+    let text = if responses_api {
+        response
+            .get("output_text")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                let output = response.get("output")?.as_array()?;
+                let mut parts = Vec::new();
+                for item in output {
+                    let Some(content) = item.get("content").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    for part in content {
+                        if matches!(
+                            part.get("type").and_then(Value::as_str),
+                            Some("output_text" | "text")
+                        ) {
+                            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                parts.push(text);
+                            }
+                        }
+                    }
+                }
+                (!parts.is_empty()).then(|| parts.join("\n"))
+            })
+    } else {
+        response
+            .get("choices")?
+            .get(0)?
+            .get("message")?
+            .get("content")?
+            .as_str()
+            .map(str::to_owned)
+    }?;
+    let trimmed = text.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 fn chunk_by_estimated_tokens(input: &str, target_tokens: usize) -> Vec<String> {
@@ -2214,6 +2267,59 @@ mod tests {
         });
 
         assert!(is_high_token_count(&value, DEFAULT_CONTEXT_TRIGGER_TOKENS));
+    }
+
+    #[test]
+    fn builds_and_parses_raw_responses_requests() {
+        assert!(is_responses_endpoint(
+            "http://127.0.0.1:15721/v1/responses?route=raw"
+        ));
+        assert!(is_responses_endpoint(
+            "http://127.0.0.1:15721/v1/responses/#raw"
+        ));
+        let payload = cc_switch_payload("summarize me", 700, "test-model", true);
+        assert_eq!(payload["input"], "summarize me");
+        assert_eq!(payload["max_output_tokens"], 700);
+        assert!(payload.get("messages").is_none());
+
+        let flattened_response = json!({"output_text": " flattened summary "});
+        assert_eq!(
+            parse_cc_switch_summary(&flattened_response, true).as_deref(),
+            Some("flattened summary")
+        );
+
+        let response = json!({
+            "output": [{
+                "type": "message",
+                "content": [
+                    {"type": "output_text", "text": " first "},
+                    {"type": "output_text", "text": "second"}
+                ]
+            }]
+        });
+        assert_eq!(
+            parse_cc_switch_summary(&response, true).as_deref(),
+            Some("first \nsecond")
+        );
+    }
+
+    #[test]
+    fn keeps_chat_completions_compatibility() {
+        assert!(!is_responses_endpoint(
+            "http://127.0.0.1:15721/v1/chat/completions"
+        ));
+        let payload = cc_switch_payload("summarize me", 700, "test-model", false);
+        assert_eq!(payload["messages"][1]["content"], "summarize me");
+        assert_eq!(payload["max_tokens"], 700);
+        assert!(payload.get("input").is_none());
+
+        let response = json!({
+            "choices": [{"message": {"content": " chat summary "}}]
+        });
+        assert_eq!(
+            parse_cc_switch_summary(&response, false).as_deref(),
+            Some("chat summary")
+        );
     }
 
     #[test]

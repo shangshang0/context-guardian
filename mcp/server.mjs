@@ -49,7 +49,7 @@ const tools = [
         recovery_tokens: { type: "integer", minimum: 10000, default: 100000 },
         large_output_bytes: { type: "integer", minimum: 10000, default: 160000 },
         cc_switch_summary: { type: "boolean", default: false, description: "Send oversized tool outputs to a trusted OpenAI-compatible API for map-reduce summarization before pruning." },
-        cc_switch_url: { type: "string", pattern: "^https?://", default: "http://127.0.0.1:15721/v1/chat/completions" },
+        cc_switch_url: { type: "string", pattern: "^https?://", default: "http://127.0.0.1:15721/v1/responses" },
         cc_switch_model: { type: "string", minLength: 1, default: "feature/gpt-5.6-sol" },
         cc_switch_chunk_target_tokens: { type: "integer", minimum: 8000, default: 120000 },
         image_base_url: { type: "string", pattern: "^https://" },
@@ -79,7 +79,7 @@ const tools = [
         confirm: { type: "boolean", description: "Required for install and remove." },
         large_output_bytes: { type: "integer", minimum: 10000, default: 160000 },
         cc_switch_summary: { type: "boolean", default: false },
-        cc_switch_url: { type: "string", pattern: "^https?://", default: "http://127.0.0.1:15721/v1/chat/completions" },
+        cc_switch_url: { type: "string", pattern: "^https?://", default: "http://127.0.0.1:15721/v1/responses" },
         cc_switch_model: { type: "string", minLength: 1, default: "feature/gpt-5.6-sol" },
         cc_switch_chunk_target_tokens: { type: "integer", minimum: 8000, default: 120000 },
         message_format_preview: { type: "boolean", default: false },
@@ -152,7 +152,7 @@ function validateThreadId(value) {
 
 function appendCcSwitchArguments(args, input) {
   if (!input.cc_switch_summary) return;
-  const endpoint = input.cc_switch_url || "http://127.0.0.1:15721/v1/chat/completions";
+  const endpoint = input.cc_switch_url || "http://127.0.0.1:15721/v1/responses";
   let parsed;
   try {
     parsed = new URL(endpoint);
@@ -280,7 +280,7 @@ async function callTool(name, input = {}) {
       const ccArgs = [];
       appendCcSwitchArguments(ccArgs, input);
       serviceEnv.CONTEXT_GUARDIAN_CC_SWITCH_SUMMARY = "1";
-      serviceEnv.CONTEXT_GUARDIAN_CC_SWITCH_URL = input.cc_switch_url || "http://127.0.0.1:15721/v1/chat/completions";
+      serviceEnv.CONTEXT_GUARDIAN_CC_SWITCH_URL = input.cc_switch_url || "http://127.0.0.1:15721/v1/responses";
       serviceEnv.CONTEXT_GUARDIAN_CC_SWITCH_MODEL = input.cc_switch_model || "feature/gpt-5.6-sol";
       serviceEnv.CONTEXT_GUARDIAN_CC_SWITCH_CHUNK_TARGET_TOKENS = String(input.cc_switch_chunk_target_tokens || 120000);
     }
