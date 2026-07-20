@@ -1,7 +1,6 @@
 {
     admin off
     email {$CONTEXT_RELAY_ACME_EMAIL}
-    default_sni {$CONTEXT_RELAY_DOMAIN}
     servers {
         protocols h1 h2
     }
@@ -23,6 +22,7 @@
 
     header {
         -Server
+        -Via
         Strict-Transport-Security "max-age=31536000"
         Cache-Control "no-store"
         X-Content-Type-Options "nosniff"
