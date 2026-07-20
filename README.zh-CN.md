@@ -48,8 +48,8 @@ Rust 二进制已内置 SQLite，不需要额外安装 `sqlite3`。
 ## 快速安装
 
 ```sh
-git clone https://github.com/shangshang0/shangTools.git
-cd shangTools/context-guardian
+git clone https://github.com/shangshang0/context-guardian.git
+cd context-guardian
 ./scripts/install.sh
 ```
 
@@ -155,7 +155,7 @@ CONTEXT_RELAY_URL=https://relay.example.com ./scripts/install.sh
 stdio MCP启动命令：
 
 ```sh
-node /absolute/path/to/shangTools/context-guardian/mcp/server.mjs
+node /absolute/path/to/context-guardian/mcp/server.mjs
 ```
 
 工具列表：

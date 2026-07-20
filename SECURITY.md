@@ -10,4 +10,4 @@ Image URL publishing is opt-in per guarded task. The public Relay isolates tenan
 
 Relay identities and image signing keys must remain local mode-`0600` files. Do not copy them between users. Report suspected credential exposure promptly and delete the local identity to rotate it after the old tenant is removed or the Relay state is reset.
 
-Report vulnerabilities privately through GitHub Security Advisories for `shangshang0/shangTools`.
+Report vulnerabilities privately through GitHub Security Advisories for `shangshang0/context-guardian`.

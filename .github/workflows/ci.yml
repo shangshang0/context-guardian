@@ -1,0 +1,28 @@
+name: context-guardian-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+
+  agent-surfaces:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --check mcp/server.mjs
+      - run: sh -n scripts/install.sh scripts/service.sh skill/context-guardian/scripts/context_guardian.sh

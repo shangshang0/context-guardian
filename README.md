@@ -48,8 +48,8 @@ SQLite is bundled into the Rust binary.
 ## Quick start
 
 ```sh
-git clone https://github.com/shangshang0/shangTools.git
-cd shangTools/context-guardian
+git clone https://github.com/shangshang0/context-guardian.git
+cd context-guardian
 ./scripts/install.sh
 ```
 
@@ -155,7 +155,7 @@ Single-user/self-hosted deployments can use a restricted SSH reverse tunnel inst
 Configure the stdio server command:
 
 ```sh
-node /absolute/path/to/shangTools/context-guardian/mcp/server.mjs
+node /absolute/path/to/context-guardian/mcp/server.mjs
 ```
 
 Tools:
