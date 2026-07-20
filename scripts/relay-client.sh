@@ -9,6 +9,8 @@ codex_home=${CODEX_HOME:-$HOME/.codex}
 identity_file="$codex_home/context-guardian/relay-identity.json"
 log_dir="$codex_home/context-guardian/logs"
 label=com.shangtools.context-relay-client
+blind_gateway=${CONTEXT_RELAY_BLIND_GATEWAY:-}
+blind_slots=${CONTEXT_RELAY_BLIND_SLOTS:-4}
 
 xml_escape() {
   printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
@@ -18,6 +20,11 @@ case "$relay_url" in
   https://*) ;;
   *) if [ "$action" = install ]; then echo "relay URL must use https://" >&2; exit 2; fi ;;
 esac
+if [ -n "$blind_gateway" ]; then
+  case "$blind_gateway" in 127.0.0.1:*|'[::1]':*) ;; *) echo "blind gateway must use loopback" >&2; exit 2 ;; esac
+  case "$blind_slots" in ''|*[!0-9]*) echo "invalid blind tunnel slot count" >&2; exit 2 ;; esac
+  [ "$blind_slots" -ge 1 ] && [ "$blind_slots" -le 8 ] || { echo "blind tunnel slots must be between 1 and 8" >&2; exit 2; }
+fi
 
 case "$(uname -s)" in
   Darwin)
@@ -33,18 +40,22 @@ case "$(uname -s)" in
         escaped_binary=$(xml_escape "$binary")
         escaped_identity=$(xml_escape "$identity_file")
         escaped_log=$(xml_escape "$log_dir")
+        blind_environment=''
+        if [ -n "$blind_gateway" ]; then
+          blind_environment="<key>CONTEXT_RELAY_BLIND_GATEWAY</key><string>$(xml_escape "$blind_gateway")</string><key>CONTEXT_RELAY_BLIND_SLOTS</key><string>$blind_slots</string>"
+        fi
         temp_file=$(mktemp)
         trap 'rm -f "$temp_file"' EXIT HUP INT TERM
-        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' '<plist version="1.0"><dict>' "<key>Label</key><string>$label</string>" '<key>ProgramArguments</key><array>' "<string>$escaped_binary</string>" '</array>' '<key>EnvironmentVariables</key><dict>' "<key>CONTEXT_RELAY_URL</key><string>$escaped_url</string>" "<key>CONTEXT_RELAY_IDENTITY_FILE</key><string>$escaped_identity</string>" '<key>CONTEXT_RELAY_LOCAL_GATEWAY</key><string>http://[::1]:8787</string>' '</dict>' '<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>' "<key>StandardOutPath</key><string>$escaped_log/relay-client.out.log</string>" "<key>StandardErrorPath</key><string>$escaped_log/relay-client.err.log</string>" '</dict></plist>' > "$temp_file"
+        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' '<plist version="1.0"><dict>' "<key>Label</key><string>$label</string>" '<key>ProgramArguments</key><array>' "<string>$escaped_binary</string>" '</array>' '<key>EnvironmentVariables</key><dict>' "<key>CONTEXT_RELAY_URL</key><string>$escaped_url</string>" "<key>CONTEXT_RELAY_IDENTITY_FILE</key><string>$escaped_identity</string>" '<key>CONTEXT_RELAY_LOCAL_GATEWAY</key><string>http://[::1]:8787</string>' "$blind_environment" '</dict>' '<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>' "<key>StandardOutPath</key><string>$escaped_log/relay-client.out.log</string>" "<key>StandardErrorPath</key><string>$escaped_log/relay-client.err.log</string>" '</dict></plist>' > "$temp_file"
         plutil -lint "$temp_file" >/dev/null
-        install -m 600 "$temp_file" "$plist"
         if [ "${CONTEXT_GUARDIAN_DRY_RUN:-0}" = 1 ]; then
           echo "validated relay client configuration"
           exit 0
         fi
+        install -m 600 "$temp_file" "$plist"
         launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
         launchctl bootstrap "gui/$(id -u)" "$plist"
-        echo "installed relay client; identity is generated automatically on first start"
+        echo "installed relay client; identity is generated automatically on first start; blind_tls=$([ -n "$blind_gateway" ] && echo enabled || echo disabled)"
         ;;
       remove) launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true; rm -f "$plist"; echo "removed $label" ;;
       status) launchctl print "gui/$(id -u)/$label" ;;

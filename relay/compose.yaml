@@ -11,8 +11,14 @@ services:
     cpus: 1.0
     tmpfs:
       - /tmp:size=16m,mode=1777
+    environment:
+      CONTEXT_RELAY_BLIND_LISTEN: ${CONTEXT_RELAY_BLIND_LISTEN:-}
+      CONTEXT_RELAY_BLIND_SUFFIX: ${CONTEXT_RELAY_BLIND_SUFFIX:-}
     expose:
       - "8080"
+      - "8443"
+    ports:
+      - "443:8443"
     logging:
       driver: local
       options:

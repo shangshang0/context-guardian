@@ -1,10 +1,17 @@
 use base64::Engine;
 use context_relay::{ClientIdentity, PollResponse, RegisterRequest, RelayResult, MAX_IMAGE_BYTES};
+use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, StatusCode};
 use std::env;
 use std::io::ErrorKind;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{header, HeaderValue};
+use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::main]
 async fn main() {
@@ -45,6 +52,34 @@ async fn run() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     register(&relay_client, &relay_url, &identity).await?;
     println!("context-relay-client registered");
+    let blind_gateway = env::var("CONTEXT_RELAY_BLIND_GATEWAY")
+        .ok()
+        .filter(|value| !value.is_empty());
+    if let Some(gateway) = blind_gateway.as_deref() {
+        validate_blind_gateway(gateway)?;
+        let slots = env::var("CONTEXT_RELAY_BLIND_SLOTS")
+            .unwrap_or_else(|_| "4".to_string())
+            .parse::<usize>()
+            .map_err(|_| "CONTEXT_RELAY_BLIND_SLOTS must be an integer".to_string())?;
+        if !(1..=8).contains(&slots) {
+            return Err("CONTEXT_RELAY_BLIND_SLOTS must be between 1 and 8".to_string());
+        }
+        for _ in 0..slots {
+            let tunnel_url = blind_tunnel_url(&relay_url, &identity.tenant_id)?;
+            let gateway = gateway.to_string();
+            let secret = identity.tenant_secret.clone();
+            tokio::spawn(async move {
+                blind_slot_loop(tunnel_url, gateway, secret).await;
+            });
+        }
+        println!("context-relay-client blind TLS slots={slots} gateway={gateway}");
+    }
+    if blind_gateway.is_some() && env_flag("CONTEXT_RELAY_BLIND_ONLY") {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
     loop {
         match poll_once(
             &relay_client,
@@ -64,6 +99,134 @@ async fn run() -> Result<(), String> {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn validate_blind_gateway(value: &str) -> Result<(), String> {
+    let address = value
+        .parse::<SocketAddr>()
+        .map_err(|_| "CONTEXT_RELAY_BLIND_GATEWAY must be an IP socket address".to_string())?;
+    if !address.ip().is_loopback() {
+        return Err("blind TLS gateway must use a loopback address".to_string());
+    }
+    Ok(())
+}
+
+fn blind_tunnel_url(relay_url: &str, tenant_id: &str) -> Result<String, String> {
+    let base = relay_url
+        .strip_prefix("https://")
+        .ok_or_else(|| "blind tunnel control URL must use HTTPS".to_string())?;
+    Ok(format!(
+        "wss://{}/v2/tunnel/{tenant_id}",
+        base.trim_end_matches('/')
+    ))
+}
+
+async fn blind_slot_loop(tunnel_url: String, gateway: String, secret: String) {
+    loop {
+        if run_blind_slot(&tunnel_url, &gateway, &secret)
+            .await
+            .is_err()
+        {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+async fn run_blind_slot(tunnel_url: &str, gateway: &str, secret: &str) -> Result<(), String> {
+    let mut request = tunnel_url
+        .into_client_request()
+        .map_err(|error| error.to_string())?;
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {secret}")).map_err(|error| error.to_string())?,
+    );
+    let (mut websocket, response) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("blind tunnel returned {}", response.status()));
+    }
+    let first_bytes = loop {
+        let message = websocket
+            .next()
+            .await
+            .ok_or_else(|| "blind tunnel closed before assignment".to_string())?
+            .map_err(|error| error.to_string())?;
+        match message {
+            Message::Binary(bytes) => break bytes,
+            Message::Ping(bytes) => websocket
+                .send(Message::Pong(bytes))
+                .await
+                .map_err(|error| error.to_string())?,
+            Message::Pong(_) => {}
+            Message::Close(_) => return Err("blind tunnel closed before assignment".to_string()),
+            Message::Text(_) | Message::Frame(_) => {
+                return Err("unexpected frame on blind tunnel".to_string())
+            }
+        }
+    };
+    let mut local = TcpStream::connect(gateway)
+        .await
+        .map_err(|error| error.to_string())?;
+    local
+        .write_all(&first_bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    bridge_local_to_websocket(websocket, local).await
+}
+
+async fn bridge_local_to_websocket(
+    websocket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
+    local: TcpStream,
+) -> Result<(), String> {
+    let (mut websocket_sender, mut websocket_receiver) = websocket.split();
+    let (mut local_reader, mut local_writer) = local.into_split();
+    let websocket_to_local = async {
+        while let Some(message) = websocket_receiver.next().await {
+            match message.map_err(|error| error.to_string())? {
+                Message::Binary(bytes) => local_writer
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|error| error.to_string())?,
+                Message::Close(_) => break,
+                Message::Ping(_) | Message::Pong(_) => {}
+                Message::Text(_) | Message::Frame(_) => {
+                    return Err("unexpected frame on blind tunnel".to_string())
+                }
+            }
+        }
+        local_writer
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string())
+    };
+    let local_to_websocket = async {
+        let mut buffer = vec![0u8; 16 * 1024];
+        loop {
+            let read = local_reader
+                .read(&mut buffer)
+                .await
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            websocket_sender
+                .send(Message::Binary(buffer[..read].to_vec().into()))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    };
+    tokio::select! {
+        result = websocket_to_local => result,
+        result = local_to_websocket => result,
     }
 }
 
@@ -292,4 +455,27 @@ fn default_identity_file() -> String {
         "{}/.codex/context-guardian/relay-identity.json",
         env::var("HOME").unwrap_or_else(|_| ".".to_string())
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_secure_blind_tunnel_urls() {
+        let tenant = "a".repeat(32);
+        assert_eq!(
+            blind_tunnel_url("https://relay.example.com:5003", &tenant).unwrap(),
+            format!("wss://relay.example.com:5003/v2/tunnel/{tenant}")
+        );
+        assert!(blind_tunnel_url("http://relay.example.com", &tenant).is_err());
+    }
+
+    #[test]
+    fn restricts_blind_gateway_to_loopback() {
+        assert!(validate_blind_gateway("127.0.0.1:8788").is_ok());
+        assert!(validate_blind_gateway("[::1]:8788").is_ok());
+        assert!(validate_blind_gateway("0.0.0.0:8788").is_err());
+        assert!(validate_blind_gateway("192.0.2.1:8788").is_err());
+    }
 }

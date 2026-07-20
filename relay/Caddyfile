@@ -9,7 +9,7 @@
 {$CONTEXT_RELAY_DOMAIN} {
     encode zstd gzip
 
-    @allowed path /healthz /v1/register /v1/poll/* /v1/result/* /t/*/image/*
+    @allowed path /healthz /v1/register /v1/poll/* /v1/result/* /v2/tunnel/* /t/*/image/*
     handle @allowed {
         reverse_proxy relay:8080
     }

@@ -9,6 +9,9 @@
 - Correlate failed wire requests with prior successful baselines using timestamps and hashed identifiers, and fail closed unless every relevant schema delta is a known lossless transformation.
 - Store published historical images as lightweight `input_text` references so Codex CLI can resume guarded tasks without rejecting remote `input_image` URLs.
 - Retain the short-lived signed URL for explicit agent or direct API retrieval without restoring Base64 data to rollout history.
+- Add preview blind Relay v2: route exact tenant SNI on public TCP `443`, carry opaque inner TLS over authenticated WSS control slots, and terminate HTTPS only in the loopback TLS image gateway so the public Relay cannot passively read URLs, headers, signatures, or image bytes.
+- Add local certificate/key support plus explicit `acme.sh` TLS-ALPN issuance and renewal through the blind tunnel; validate certificate hostname, lifetime, key pairing, and private-key permissions before service installation.
+- Add the `blind_relay_service` MCP tool, hardened v2 connection/slot/ClientHello/lifetime limits, Docker deployment configuration, bidirectional opaque-routing tests, and bilingual honest-but-curious versus malicious-domain-owner documentation.
 
 ## 0.4.1
 

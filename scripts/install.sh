@@ -18,18 +18,19 @@ cp "$root/scripts/image-tunnel.sh" "$install_root/image-tunnel.sh"
 cp "$root/scripts/relay-client.sh" "$install_root/relay-client.sh"
 cp "$root/scripts/setup-public-relay.sh" "$install_root/setup-public-relay.sh"
 cp "$root/scripts/passive-capture-service.sh" "$install_root/passive-capture-service.sh"
-chmod +x "$install_root/context-guardian" "$install_root/context-image-gateway" "$install_root/context-guardian-passive-capture" "$install_root/context-relay-client" "$install_root/context-guardian-mcp.mjs" "$install_root/service.sh" "$install_root/image-tunnel.sh" "$install_root/relay-client.sh" "$install_root/setup-public-relay.sh" "$install_root/passive-capture-service.sh"
+cp "$root/scripts/setup-blind-relay.sh" "$install_root/setup-blind-relay.sh"
+chmod +x "$install_root/context-guardian" "$install_root/context-image-gateway" "$install_root/context-guardian-passive-capture" "$install_root/context-relay-client" "$install_root/context-guardian-mcp.mjs" "$install_root/service.sh" "$install_root/image-tunnel.sh" "$install_root/relay-client.sh" "$install_root/setup-public-relay.sh" "$install_root/passive-capture-service.sh" "$install_root/setup-blind-relay.sh"
 ln -sf "$install_root/context-guardian" "$bin_dir/context-guardian"
 ln -sf "$install_root/context-image-gateway" "$bin_dir/context-image-gateway"
 ln -sf "$install_root/context-guardian-passive-capture" "$bin_dir/context-guardian-passive-capture"
 cat > "$install_root/context-guardian-mcp" <<EOF
 #!/bin/sh
-CONTEXT_GUARDIAN_INSTALLED=1 CONTEXT_GUARDIAN_SERVICE_SCRIPT="$install_root/service.sh" CONTEXT_RELAY_CLIENT_SCRIPT="$install_root/relay-client.sh" CONTEXT_GUARDIAN_PASSIVE_CAPTURE_SERVICE_SCRIPT="$install_root/passive-capture-service.sh" exec node "$install_root/context-guardian-mcp.mjs" "\$@"
+CONTEXT_GUARDIAN_INSTALLED=1 CONTEXT_GUARDIAN_SERVICE_SCRIPT="$install_root/service.sh" CONTEXT_RELAY_CLIENT_SCRIPT="$install_root/relay-client.sh" CONTEXT_GUARDIAN_PASSIVE_CAPTURE_SERVICE_SCRIPT="$install_root/passive-capture-service.sh" CONTEXT_GUARDIAN_BLIND_RELAY_SERVICE_SCRIPT="$install_root/setup-blind-relay.sh" exec node "$install_root/context-guardian-mcp.mjs" "\$@"
 EOF
 chmod +x "$install_root/context-guardian-mcp"
 ln -sf "$install_root/context-guardian-mcp" "$bin_dir/context-guardian-mcp"
 
-printf '%s\n' "Installed CLI: $bin_dir/context-guardian" "Installed passive sidecar: $bin_dir/context-guardian-passive-capture" "Installed gateway: $bin_dir/context-image-gateway" "Installed relay client: $install_root/context-relay-client" "Installed service managers: $install_root/service.sh, $install_root/passive-capture-service.sh, and $install_root/relay-client.sh" "Installed MCP: $bin_dir/context-guardian-mcp" "Add $bin_dir to PATH if needed."
+printf '%s\n' "Installed CLI: $bin_dir/context-guardian" "Installed passive sidecar: $bin_dir/context-guardian-passive-capture" "Installed gateway: $bin_dir/context-image-gateway" "Installed relay client: $install_root/context-relay-client" "Installed service managers: $install_root/service.sh, $install_root/passive-capture-service.sh, $install_root/relay-client.sh, and $install_root/setup-blind-relay.sh" "Installed MCP: $bin_dir/context-guardian-mcp" "Add $bin_dir to PATH if needed."
 
 if [ "${CONTEXT_GUARDIAN_SKIP_PUBLIC_RELAY:-0}" != 1 ] && [ "$(uname -s)" = Darwin ]; then
   "$install_root/setup-public-relay.sh" "${CONTEXT_RELAY_URL:-https://dxcfvghbjdfnaef.duckdns.org:5003}"

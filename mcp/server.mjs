@@ -20,6 +20,7 @@ const passiveCaptureBinary = process.env.CONTEXT_GUARDIAN_PASSIVE_CAPTURE_BIN ||
 const serviceScript = process.env.CONTEXT_GUARDIAN_SERVICE_SCRIPT || join(root, "scripts", "service.sh");
 const relayClientScript = process.env.CONTEXT_RELAY_CLIENT_SCRIPT || join(root, "scripts", "relay-client.sh");
 const passiveCaptureServiceScript = process.env.CONTEXT_GUARDIAN_PASSIVE_CAPTURE_SERVICE_SCRIPT || join(root, "scripts", "passive-capture-service.sh");
+const blindRelayServiceScript = process.env.CONTEXT_GUARDIAN_BLIND_RELAY_SERVICE_SCRIPT || join(root, "scripts", "setup-blind-relay.sh");
 const MAX_CHILD_OUTPUT_BYTES = 1024 * 1024;
 
 const tools = [
@@ -117,6 +118,24 @@ const tools = [
         action: { type: "string", enum: ["install", "remove", "status"] },
         relay_url: { type: "string", pattern: "^https://" },
         confirm: { type: "boolean", description: "Required for install and remove." }
+      },
+      required: ["action"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "blind_relay_service",
+    description: "Install, renew, remove, or inspect the preview blind TLS image Relay. TLS terminates at the local gateway so the public Relay forwards ciphertext only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["install", "renew", "remove", "status"] },
+        relay_url: { type: "string", pattern: "^https://" },
+        blind_suffix: { type: "string", pattern: "^[A-Za-z0-9.-]+$" },
+        acme_email: { type: "string" },
+        certificate_file: { type: "string" },
+        private_key_file: { type: "string" },
+        confirm: { type: "boolean", description: "Required for install, renew, and remove." }
       },
       required: ["action"],
       additionalProperties: false
@@ -291,6 +310,27 @@ async function callTool(name, input = {}) {
       throw new Error("relay_url using https:// is required for install");
     }
     return run("sh", [relayClientScript, input.action, input.relay_url || ""]);
+  }
+  if (name === "blind_relay_service") {
+    if (!["install", "renew", "remove", "status"].includes(input.action)) throw new Error("invalid action");
+    if (!["status"].includes(input.action) && input.confirm !== true) throw new Error("confirm=true is required for blind Relay changes");
+    if (["install", "renew"].includes(input.action)) {
+      if (typeof input.relay_url !== "string" || !input.relay_url.startsWith("https://")) throw new Error("relay_url using HTTPS is required");
+      if (typeof input.blind_suffix !== "string" || !/^[A-Za-z0-9.-]+$/.test(input.blind_suffix)) throw new Error("valid blind_suffix is required");
+      const customCertificate = [input.certificate_file, input.private_key_file];
+      if (customCertificate.some(Boolean) && !customCertificate.every(Boolean)) throw new Error("certificate_file and private_key_file must be provided together");
+      if (!customCertificate.every(Boolean) && !input.acme_email) throw new Error("acme_email is required when no certificate pair is supplied");
+    }
+    const blindEnv = {};
+    if (input.certificate_file) blindEnv.CONTEXT_RELAY_BLIND_CERT_FILE = input.certificate_file;
+    if (input.private_key_file) blindEnv.CONTEXT_RELAY_BLIND_KEY_FILE = input.private_key_file;
+    return run("sh", [
+      blindRelayServiceScript,
+      input.action,
+      input.relay_url || "",
+      input.blind_suffix || "",
+      input.acme_email || ""
+    ], blindEnv);
   }
   throw new Error(`unknown tool: ${name}`);
 }
