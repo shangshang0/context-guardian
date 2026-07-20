@@ -1,5 +1,10 @@
+mod message_format;
+
 use base64::Engine;
 use hmac::{Hmac, Mac};
+use message_format::{
+    diagnose_records, is_task_error, run_live_probe, LiveProbeResult, MessageDiagnosis,
+};
 use rusqlite::{params, Connection};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -21,6 +26,7 @@ const DEFAULT_CC_SWITCH_CHUNK_TARGET_TOKENS: usize = 120_000;
 const CC_SWITCH_MAX_REDUCE_ROUNDS: usize = 4;
 const QUIET_DELAY_MS: u64 = 250;
 const DEFAULT_IMAGE_URL_TTL_SECONDS: u64 = 900;
+const DEFAULT_MESSAGE_FORMAT_PROBE_TIMEOUT_SECONDS: u64 = 60;
 
 #[derive(Debug)]
 struct Config {
@@ -40,6 +46,11 @@ struct Config {
     cc_switch_summary: bool,
     cc_switch_chunk_target_tokens: usize,
     image_publisher: Option<ImagePublisher>,
+    message_format_preview: bool,
+    message_format_live_probe: bool,
+    message_format_probe_command: PathBuf,
+    message_format_probe_timeout: Duration,
+    message_format_report_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +72,13 @@ struct CleanStats {
     folded_obsolete_lines: usize,
     normalized_token_counts: usize,
     normalized_goal_token_counts: usize,
+    message_format_issues: usize,
+    message_format_unrepaired_issues: usize,
+    repaired_message_records: usize,
+    dropped_unknown_error_lines: usize,
+    message_probe_attempted: bool,
+    message_probe_succeeded: bool,
+    message_format_report: Option<PathBuf>,
     backup_path: Option<PathBuf>,
 }
 
@@ -140,7 +158,7 @@ fn main() {
                     thread::sleep(Duration::from_millis(QUIET_DELAY_MS));
                     match clean_rollout(&config) {
                         Ok(stats) => {
-                            if stats.changed() {
+                            if stats.noteworthy() {
                                 log_stats(&stats);
                             }
                             last_seen = file_fingerprint(&config.rollout).ok();
@@ -197,6 +215,13 @@ impl Config {
             cc_switch_summary: false,
             cc_switch_chunk_target_tokens: DEFAULT_CC_SWITCH_CHUNK_TARGET_TOKENS,
             image_publisher: None,
+            message_format_preview: env_flag("CONTEXT_GUARDIAN_MESSAGE_FORMAT_PREVIEW"),
+            message_format_live_probe: env_flag("CONTEXT_GUARDIAN_MESSAGE_FORMAT_LIVE_PROBE"),
+            message_format_probe_command: default_codex_probe_command(),
+            message_format_probe_timeout: Duration::from_secs(
+                DEFAULT_MESSAGE_FORMAT_PROBE_TIMEOUT_SECONDS,
+            ),
+            message_format_report_dir: codex_home.join("context-guardian/message-format-reports"),
         };
         let mut image_base_url = None;
         let mut image_signing_key_file = None;
@@ -257,6 +282,23 @@ impl Config {
                 }
                 "--disable-cc-switch-summary" => config.cc_switch_summary = false,
                 "--enable-cc-switch-summary" => config.cc_switch_summary = true,
+                "--enable-message-format-preview" => config.message_format_preview = true,
+                "--enable-message-format-live-probe" => config.message_format_live_probe = true,
+                "--message-format-probe-command" => {
+                    config.message_format_probe_command =
+                        PathBuf::from(next_value(&mut args, "--message-format-probe-command")?)
+                }
+                "--message-format-probe-timeout-seconds" => {
+                    let value = next_value(&mut args, "--message-format-probe-timeout-seconds")?;
+                    let seconds = value.parse::<u64>().map_err(|_| {
+                        format!("invalid --message-format-probe-timeout-seconds value: {value}")
+                    })?;
+                    config.message_format_probe_timeout = Duration::from_secs(seconds);
+                }
+                "--message-format-report-dir" => {
+                    config.message_format_report_dir =
+                        PathBuf::from(next_value(&mut args, "--message-format-report-dir")?)
+                }
                 "--image-base-url" => {
                     image_base_url = Some(next_value(&mut args, "--image-base-url")?)
                 }
@@ -410,6 +452,15 @@ impl CleanStats {
             || self.folded_obsolete_lines > 0
             || self.normalized_token_counts > 0
             || self.normalized_goal_token_counts > 0
+            || self.repaired_message_records > 0
+            || self.dropped_unknown_error_lines > 0
+    }
+
+    fn noteworthy(&self) -> bool {
+        self.changed()
+            || self.message_format_issues > 0
+            || self.message_probe_attempted
+            || self.message_format_report.is_some()
     }
 
     fn needs_backup(&self) -> bool {
@@ -419,6 +470,8 @@ impl CleanStats {
             || self.folded_obsolete_lines > 0
             || self.normalized_token_counts > 0
             || self.normalized_goal_token_counts > 0
+            || self.repaired_message_records > 0
+            || self.dropped_unknown_error_lines > 0
     }
 }
 
@@ -434,7 +487,27 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
 }
 
 fn help_text() -> String {
-    "Usage: context-guardian --thread-id ID [--status|--once] [--rollout PATH] [--state-db PATH] [--goals-db PATH] [--interval-ms N] [--context-trigger-tokens N] [--recovery-tokens N] [--large-tool-output-bytes N] [--image-base-url HTTPS_URL --image-signing-key-file FILE --image-cache-dir DIR --image-url-ttl-seconds N] [--enable-cc-switch-summary]".to_string()
+    "Usage: context-guardian --thread-id ID [--status|--once] [--rollout PATH] [--state-db PATH] [--goals-db PATH] [--interval-ms N] [--context-trigger-tokens N] [--recovery-tokens N] [--large-tool-output-bytes N] [--image-base-url HTTPS_URL --image-signing-key-file FILE --image-cache-dir DIR --image-url-ttl-seconds N] [--enable-cc-switch-summary] [--enable-message-format-preview [--enable-message-format-live-probe] [--message-format-probe-command PATH] [--message-format-probe-timeout-seconds N] [--message-format-report-dir DIR]]".to_string()
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn default_codex_probe_command() -> PathBuf {
+    if let Some(command) = env::var_os("CONTEXT_GUARDIAN_MESSAGE_FORMAT_PROBE_COMMAND")
+        .or_else(|| env::var_os("CODEX_BIN"))
+    {
+        return PathBuf::from(command);
+    }
+    let app_binary = PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex");
+    if app_binary.is_file() {
+        app_binary
+    } else {
+        PathBuf::from("codex")
+    }
 }
 
 fn validate_scope(config: &Config) -> io::Result<()> {
@@ -449,6 +522,19 @@ fn validate_scope(config: &Config) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "--recovery-tokens must be lower than --context-trigger-tokens",
+        ));
+    }
+
+    if config.message_format_live_probe && !config.message_format_preview {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--enable-message-format-live-probe requires --enable-message-format-preview",
+        ));
+    }
+    if !(5..=300).contains(&config.message_format_probe_timeout.as_secs()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "message format probe timeout must be between 5 and 300 seconds",
         ));
     }
 
@@ -514,7 +600,39 @@ fn clean_rollout(config: &Config) -> io::Result<CleanStats> {
     let contents = fs::read_to_string(&config.rollout)?;
     let records = parse_records(&contents)?;
     let analysis = analyze_records(&records, config.context_trigger_tokens);
+    let unknown_error_indexes = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            (is_task_error(&record.value) && !is_recoverable_task_error(&record.value))
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let message_diagnosis = (config.message_format_preview && !unknown_error_indexes.is_empty())
+        .then(|| diagnose_records(records.iter().map(|record| &record.value)));
+    let message_probe = if config.message_format_live_probe && !unknown_error_indexes.is_empty() {
+        run_live_probe(
+            &config.message_format_probe_command,
+            config.message_format_probe_timeout,
+        )
+    } else {
+        LiveProbeResult::not_requested()
+    };
+    let apply_message_repairs = message_diagnosis.as_ref().is_some_and(|diagnosis| {
+        diagnosis.repaired_records() > 0
+            && diagnosis.unrepaired_issues() == 0
+            && (!config.message_format_live_probe || message_probe.succeeded)
+    });
     let mut stats = CleanStats::default();
+    if let Some(diagnosis) = message_diagnosis.as_ref() {
+        stats.message_format_issues = diagnosis.issues.len();
+        stats.message_format_unrepaired_issues = diagnosis.unrepaired_issues();
+        if apply_message_repairs {
+            stats.repaired_message_records = diagnosis.repaired_records();
+        }
+    }
+    stats.message_probe_attempted = message_probe.attempted;
+    stats.message_probe_succeeded = message_probe.succeeded;
     let mut output = String::with_capacity(contents.len());
 
     for (index, record) in records.iter().enumerate() {
@@ -530,7 +648,20 @@ fn clean_rollout(config: &Config) -> io::Result<CleanStats> {
             continue;
         }
 
-        let mut value = record.value.clone();
+        if apply_message_repairs && unknown_error_indexes.contains(&index) {
+            stats.dropped_unknown_error_lines += 1;
+            continue;
+        }
+
+        let mut value = if apply_message_repairs {
+            message_diagnosis
+                .as_ref()
+                .and_then(|diagnosis| diagnosis.repaired_values.get(&index))
+                .cloned()
+                .unwrap_or_else(|| record.value.clone())
+        } else {
+            record.value.clone()
+        };
         if normalize_token_count_event(
             &mut value,
             &records,
@@ -589,6 +720,16 @@ fn clean_rollout(config: &Config) -> io::Result<CleanStats> {
     }
 
     if !stats.changed() {
+        if let Some(diagnosis) = message_diagnosis.as_ref() {
+            stats.message_format_report = Some(write_message_format_report(
+                config,
+                &unknown_error_indexes,
+                diagnosis,
+                &message_probe,
+                false,
+                None,
+            )?);
+        }
         return Ok(stats);
     }
 
@@ -605,6 +746,16 @@ fn clean_rollout(config: &Config) -> io::Result<CleanStats> {
         let backup_path = backup_path(&config.backup_dir, &config.rollout);
         fs::copy(&config.rollout, &backup_path)?;
         stats.backup_path = Some(backup_path);
+    }
+    if let Some(diagnosis) = message_diagnosis.as_ref() {
+        stats.message_format_report = Some(write_message_format_report(
+            config,
+            &unknown_error_indexes,
+            diagnosis,
+            &message_probe,
+            apply_message_repairs,
+            stats.backup_path.as_deref(),
+        )?);
     }
     write_same_inode(&config.rollout, output.as_bytes())?;
     Ok(stats)
@@ -713,9 +864,75 @@ fn backup_path(backup_dir: &Path, rollout: &Path) -> PathBuf {
     backup_dir.join(format!("{basename}.before-janitor-{stamp}.jsonl"))
 }
 
+fn write_message_format_report(
+    config: &Config,
+    unknown_error_indexes: &[usize],
+    diagnosis: &MessageDiagnosis,
+    probe: &LiveProbeResult,
+    repairs_applied: bool,
+    backup: Option<&Path>,
+) -> io::Result<PathBuf> {
+    fs::create_dir_all(&config.message_format_report_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            &config.message_format_report_dir,
+            fs::Permissions::from_mode(0o700),
+        )?;
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = config
+        .message_format_report_dir
+        .join(format!("message-format-{}-{stamp}.json", config.thread_id));
+    let cli_version = open_database(&config.state_db)
+        .and_then(|connection| {
+            connection
+                .query_row(
+                    "SELECT COALESCE(cli_version, '') FROM threads WHERE id = ?1",
+                    params![config.thread_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(sqlite_error)
+        })
+        .unwrap_or_default();
+    let report = json!({
+        "preview_version": 1,
+        "thread_id": config.thread_id,
+        "rollout_file": config.rollout.file_name().and_then(|name| name.to_str()).unwrap_or("rollout.jsonl"),
+        "codex_cli_version": cli_version,
+        "generated_at_unix_seconds": unix_seconds(),
+        "unknown_error_lines": unknown_error_indexes.iter().map(|index| index + 1).collect::<Vec<_>>(),
+        "checked_message_records": diagnosis.checked_records,
+        "issues": diagnosis.issues.iter().map(|issue| issue.as_json()).collect::<Vec<_>>(),
+        "unrepaired_issues": diagnosis.unrepaired_issues(),
+        "repaired_records": diagnosis.repaired_records(),
+        "repairs_applied": repairs_applied,
+        "live_probe": probe.as_json(),
+        "privacy": "schema paths and value types only; message text, credentials, and request bodies are not recorded",
+        "backup_file": backup.and_then(Path::file_name).and_then(|name| name.to_str()),
+    });
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    serde_json::to_writer_pretty(&mut file, &report)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(path)
+}
+
 fn log_stats(stats: &CleanStats) {
     println!(
-        "pruned_image_outputs={} pruned_user_image_attachments={} pruned_large_tool_outputs={} removed_data_uri_bytes={} removed_large_output_bytes={} dropped_context_alert_lines={} folded_obsolete_lines={} normalized_token_counts={} normalized_goal_token_counts={} backup={}",
+        "pruned_image_outputs={} pruned_user_image_attachments={} pruned_large_tool_outputs={} removed_data_uri_bytes={} removed_large_output_bytes={} dropped_context_alert_lines={} folded_obsolete_lines={} normalized_token_counts={} normalized_goal_token_counts={} message_format_issues={} message_format_unrepaired_issues={} repaired_message_records={} dropped_unknown_error_lines={} message_probe_attempted={} message_probe_succeeded={} message_format_report={} backup={}",
         stats.pruned_image_outputs,
         stats.pruned_user_image_attachments,
         stats.pruned_large_tool_outputs,
@@ -725,6 +942,17 @@ fn log_stats(stats: &CleanStats) {
         stats.folded_obsolete_lines,
         stats.normalized_token_counts,
         stats.normalized_goal_token_counts,
+        stats.message_format_issues,
+        stats.message_format_unrepaired_issues,
+        stats.repaired_message_records,
+        stats.dropped_unknown_error_lines,
+        stats.message_probe_attempted,
+        stats.message_probe_succeeded,
+        stats
+            .message_format_report
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string()),
         stats
             .backup_path
             .as_ref()
@@ -835,6 +1063,9 @@ fn print_status(config: &Config) -> io::Result<()> {
             "over_threshold": tokens_used >= config.context_trigger_tokens,
             "model": model,
             "title": title,
+            "message_format_preview": config.message_format_preview,
+            "message_format_live_probe": config.message_format_live_probe,
+            "message_format_report_dir": config.message_format_report_dir,
         })
     );
     Ok(())
@@ -1810,5 +2041,96 @@ mod tests {
             inline_data_image_bytes(&value),
             "data:image/png;base64,abcdef".len()
         );
+    }
+
+    #[test]
+    fn preview_repairs_message_format_after_unknown_error() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = env::temp_dir().join(format!(
+            "context-guardian-message-format-integration-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let rollout = temp_dir.join(format!("rollout-{TEST_THREAD_ID}.jsonl"));
+        let compacted = json!({
+            "type": "compacted",
+            "payload": {
+                "message": "summary",
+                "replacement_history": "[{\"role\":\"user\",\"content\":\"hello\"}]"
+            }
+        });
+        let unknown_error = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "error": {"message": "unclassified provider failure"}
+            }
+        });
+        fs::write(&rollout, format!("{}\n{}\n", compacted, unknown_error)).unwrap();
+        let state_db = temp_dir.join("state_5.sqlite");
+        let connection = Connection::open(&state_db).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, cli_version TEXT);\n\
+                 INSERT INTO threads VALUES ('{TEST_THREAD_ID}', 'codex-cli-test');"
+            ))
+            .unwrap();
+        drop(connection);
+        let config = Config {
+            thread_id: TEST_THREAD_ID.to_string(),
+            rollout: rollout.clone(),
+            state_db,
+            goals_db: temp_dir.join("goals_1.sqlite"),
+            interval: Duration::from_secs(1),
+            once: true,
+            status: false,
+            backup_dir: temp_dir.join("backups"),
+            context_trigger_tokens: DEFAULT_CONTEXT_TRIGGER_TOKENS,
+            recovery_tokens: DEFAULT_RECOVERY_TOKENS,
+            large_tool_output_bytes: DEFAULT_LARGE_TOOL_OUTPUT_BYTES,
+            cc_switch_url: DEFAULT_CC_SWITCH_URL.to_string(),
+            cc_switch_model: DEFAULT_CC_SWITCH_MODEL.to_string(),
+            cc_switch_summary: false,
+            cc_switch_chunk_target_tokens: DEFAULT_CC_SWITCH_CHUNK_TARGET_TOKENS,
+            image_publisher: None,
+            message_format_preview: true,
+            message_format_live_probe: false,
+            message_format_probe_command: PathBuf::from("codex"),
+            message_format_probe_timeout: Duration::from_secs(60),
+            message_format_report_dir: temp_dir.join("reports"),
+        };
+
+        let stats = clean_rollout(&config).unwrap();
+        assert_eq!(stats.repaired_message_records, 1);
+        assert_eq!(stats.dropped_unknown_error_lines, 1);
+        assert_eq!(stats.message_format_unrepaired_issues, 0);
+        assert!(stats
+            .backup_path
+            .as_ref()
+            .is_some_and(|path| path.is_file()));
+        assert!(stats
+            .message_format_report
+            .as_ref()
+            .is_some_and(|path| path.is_file()));
+        let report = fs::read_to_string(stats.message_format_report.as_ref().unwrap()).unwrap();
+        assert!(!report.contains("hello"));
+        assert!(!report.contains("unclassified provider failure"));
+        assert!(report.contains("\"actual\": \"string\""));
+
+        let repaired = fs::read_to_string(&rollout).unwrap();
+        let records = parse_records(&repaired).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].value["payload"]["replacement_history"][0]["content"][0],
+            json!({"type": "input_text", "text": "hello"})
+        );
+        assert!(!is_task_error(&records[0].value));
+
+        let second_pass = clean_rollout(&config).unwrap();
+        assert!(!second_pass.noteworthy());
+        fs::remove_dir_all(temp_dir).unwrap();
     }
 }

@@ -35,6 +35,7 @@ case "$(uname -s)" in
         escaped_log=$(xml_escape "$log_dir")
         image_config="$codex_home/context-guardian/image-publishing.env"
         image_arguments=''
+        preview_arguments=''
         if [ -f "$image_config" ]; then
           [ "$(stat -f '%Lp' "$image_config")" = 600 ] || { echo "$image_config must have mode 600" >&2; exit 2; }
           image_base_url=$(sed -n 's/^CONTEXT_GUARDIAN_IMAGE_BASE_URL=//p' "$image_config")
@@ -47,9 +48,15 @@ case "$(uname -s)" in
           case "$image_ttl" in ''|*[!0-9]*) echo "invalid image URL TTL" >&2; exit 2 ;; esac
           image_arguments="<string>--image-base-url</string><string>$(xml_escape "$image_base_url")</string><string>--image-signing-key-file</string><string>$(xml_escape "$image_key_file")</string><string>--image-cache-dir</string><string>$(xml_escape "$image_cache_dir")</string><string>--image-url-ttl-seconds</string><string>$image_ttl</string>"
         fi
+        if [ "${CONTEXT_GUARDIAN_MESSAGE_FORMAT_PREVIEW:-0}" = 1 ]; then
+          preview_arguments='<string>--enable-message-format-preview</string>'
+          if [ "${CONTEXT_GUARDIAN_MESSAGE_FORMAT_LIVE_PROBE:-0}" = 1 ]; then
+            preview_arguments="$preview_arguments<string>--enable-message-format-live-probe</string>"
+          fi
+        fi
         apply_file=$(mktemp)
         trap 'rm -f "$apply_file"' EXIT HUP INT TERM
-        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' '<plist version="1.0"><dict>' "<key>Label</key><string>$label</string>" '<key>ProgramArguments</key><array>' "<string>$escaped_binary</string>" '<string>--thread-id</string>' "<string>$thread_id</string>" "$image_arguments" '</array>' '<key>EnvironmentVariables</key><dict>' "<key>CODEX_HOME</key><string>$escaped_home</string>" '</dict>' '<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>' "<key>StandardOutPath</key><string>$escaped_log/$thread_id.out.log</string>" "<key>StandardErrorPath</key><string>$escaped_log/$thread_id.err.log</string>" '</dict></plist>' > "$apply_file"
+        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' '<plist version="1.0"><dict>' "<key>Label</key><string>$label</string>" '<key>ProgramArguments</key><array>' "<string>$escaped_binary</string>" '<string>--thread-id</string>' "<string>$thread_id</string>" "$image_arguments" "$preview_arguments" '</array>' '<key>EnvironmentVariables</key><dict>' "<key>CODEX_HOME</key><string>$escaped_home</string>" '</dict>' '<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>' "<key>StandardOutPath</key><string>$escaped_log/$thread_id.out.log</string>" "<key>StandardErrorPath</key><string>$escaped_log/$thread_id.err.log</string>" '</dict></plist>' > "$apply_file"
         plutil -lint "$apply_file" >/dev/null
         install -m 600 "$apply_file" "$plist"
         if [ "${CONTEXT_GUARDIAN_DRY_RUN:-0}" = 1 ]; then
@@ -74,7 +81,14 @@ case "$(uname -s)" in
         mkdir -p "$unit_dir"
         quoted_binary=$(printf '%s' "$binary" | sed 's/\\/\\\\/g; s/"/\\"/g')
         quoted_home=$(printf '%s' "$codex_home" | sed 's/\\/\\\\/g; s/"/\\"/g')
-        printf '%s\n' '[Unit]' "Description=Context Guardian for $thread_id" '[Service]' "Environment=CODEX_HOME=$quoted_home" "ExecStart=$quoted_binary --thread-id $thread_id" 'Restart=always' 'RestartSec=2' '[Install]' 'WantedBy=default.target' > "$unit_path"
+        preview_arguments=''
+        if [ "${CONTEXT_GUARDIAN_MESSAGE_FORMAT_PREVIEW:-0}" = 1 ]; then
+          preview_arguments=' --enable-message-format-preview'
+          if [ "${CONTEXT_GUARDIAN_MESSAGE_FORMAT_LIVE_PROBE:-0}" = 1 ]; then
+            preview_arguments="$preview_arguments --enable-message-format-live-probe"
+          fi
+        fi
+        printf '%s\n' '[Unit]' "Description=Context Guardian for $thread_id" '[Service]' "Environment=CODEX_HOME=$quoted_home" "ExecStart=$quoted_binary --thread-id $thread_id$preview_arguments" 'Restart=always' 'RestartSec=2' '[Install]' 'WantedBy=default.target' > "$unit_path"
         systemctl --user daemon-reload
         systemctl --user enable --now "$unit"
         echo "installed $unit"

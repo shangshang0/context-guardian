@@ -7,10 +7,17 @@
 - Prunes or optionally summarizes oversized tool outputs.
 - Folds obsolete pre-compaction history only when a later `compacted` record already exists.
 - Lowers stale `threads.tokens_used` and `thread_goals.tokens_used` only for the configured task.
+- In preview mode, validates message envelopes after unknown failures and repairs only lossless structural transformations.
 
 ## What it does not guarantee
 
 The recovery counter, normally `100000`, is a safe index value. It is not a measurement that every retained token is useful, nor proof that all prior facts survived. Semantic continuity depends primarily on the quality of the existing compacted summary and the retained active tail.
+
+## Message format failures
+
+Compaction or third-party processing may stringify `replacement_history`, flatten typed content arrays, swap `input_text` and `output_text`, or leave function arguments as objects instead of JSON strings. Preview diagnosis compares field paths and value types without recording content. If every difference has a lossless normalization, Guardian backs up the rollout, repairs the records, and removes the triggering unknown failure event. Any ambiguous role, missing text, or unknown content type fails closed.
+
+The optional live probe establishes that the installed Codex CLI can complete a minimal request with the current user's provider/auth/proxy settings. It is an availability oracle, not a packet capture, and cannot prove that missing semantic content is recoverable.
 
 ## Repeated writeback
 

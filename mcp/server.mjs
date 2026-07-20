@@ -46,7 +46,11 @@ const tools = [
         image_base_url: { type: "string", pattern: "^https://" },
         image_signing_key_file: { type: "string" },
         image_cache_dir: { type: "string" },
-        image_url_ttl_seconds: { type: "integer", minimum: 1, maximum: 86400, default: 900 }
+        image_url_ttl_seconds: { type: "integer", minimum: 1, maximum: 86400, default: 900 },
+        message_format_preview: { type: "boolean", default: false, description: "Preview: diagnose and safely normalize damaged message envelopes after unknown task errors." },
+        message_format_live_probe: { type: "boolean", default: false, description: "Send one minimal live Codex probe in the current user environment before applying message repairs." },
+        message_format_probe_timeout_seconds: { type: "integer", minimum: 5, maximum: 300, default: 60 },
+        message_format_probe_command: { type: "string", description: "Optional path to the current user's Codex CLI binary." }
       },
       required: ["thread_id", "confirm"],
       additionalProperties: false
@@ -60,7 +64,9 @@ const tools = [
       properties: {
         action: { type: "string", enum: ["install", "remove", "status"] },
         thread_id: { type: "string" },
-        confirm: { type: "boolean", description: "Required for install and remove." }
+        confirm: { type: "boolean", description: "Required for install and remove." },
+        message_format_preview: { type: "boolean", default: false },
+        message_format_live_probe: { type: "boolean", default: false }
       },
       required: ["action", "thread_id"],
       additionalProperties: false
@@ -93,9 +99,9 @@ async function ensureExecutable(path) {
   await access(path, constants.X_OK);
 }
 
-function run(command, args) {
+function run(command, args, extraEnv = {}) {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { env: { ...process.env, ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let outputBytes = 0;
@@ -152,13 +158,32 @@ async function callTool(name, input = {}) {
         "--image-url-ttl-seconds", String(input.image_url_ttl_seconds || 900)
       );
     }
+    if (input.message_format_live_probe && !input.message_format_preview) {
+      throw new Error("message_format_live_probe requires message_format_preview");
+    }
+    if (input.message_format_preview) args.push("--enable-message-format-preview");
+    if (input.message_format_live_probe) {
+      args.push(
+        "--enable-message-format-live-probe",
+        "--message-format-probe-timeout-seconds", String(input.message_format_probe_timeout_seconds || 60)
+      );
+      if (input.message_format_probe_command) {
+        args.push("--message-format-probe-command", input.message_format_probe_command);
+      }
+    }
     return run(binary, args);
   }
   if (name === "guardian_service") {
     const threadId = validateThreadId(input.thread_id);
     if (!["install", "remove", "status"].includes(input.action)) throw new Error("invalid action");
     if (input.action !== "status" && input.confirm !== true) throw new Error("confirm=true is required for service changes");
-    return run("sh", [serviceScript, input.action, threadId, binary]);
+    if (input.message_format_live_probe && !input.message_format_preview) {
+      throw new Error("message_format_live_probe requires message_format_preview");
+    }
+    const serviceEnv = {};
+    if (input.message_format_preview) serviceEnv.CONTEXT_GUARDIAN_MESSAGE_FORMAT_PREVIEW = "1";
+    if (input.message_format_live_probe) serviceEnv.CONTEXT_GUARDIAN_MESSAGE_FORMAT_LIVE_PROBE = "1";
+    return run("sh", [serviceScript, input.action, threadId, binary], serviceEnv);
   }
   if (name === "relay_client_service") {
     if (!["install", "remove", "status"].includes(input.action)) throw new Error("invalid action");

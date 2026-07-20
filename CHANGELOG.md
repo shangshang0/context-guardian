@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add an opt-in message-format recovery preview that diagnoses unknown task failures, validates compacted/request message envelopes, writes privacy-preserving schema diffs, and applies only lossless repairs after backup.
+- Add an optional ephemeral live Codex probe using the current user environment; when enabled, safe automatic repair requires a successful probe and never captures raw TLS requests, credentials, or message bodies.
 - Store published historical images as lightweight `input_text` references so Codex CLI can resume guarded tasks without rejecting remote `input_image` URLs.
 - Retain the short-lived signed URL for explicit agent or direct API retrieval without restoring Base64 data to rollout history.
 

@@ -10,6 +10,7 @@ Context Guardian is a Rust sidecar for inspecting, recovering, and continuously 
 - Repairs stale per-task token counters without changing global Codex settings.
 - Removes oversized inline image/Base64 bodies and tool outputs from persisted rollout JSONL.
 - Preserves existing compacted summaries and the active conversation tail.
+- Preview: diagnoses and safely repairs message-envelope damage after unknown task failures.
 - Optionally publishes scrubbed images through a signed, expiring URL.
 - Supports a default public multi-tenant Relay or a fully self-hosted Docker Relay.
 
@@ -95,6 +96,37 @@ context-guardian --thread-id 019f...
 
 The rollout path is discovered from `state_5.sqlite`. Override `--rollout`, `--state-db`, or `--goals-db` only for custom layouts.
 
+## Message format recovery preview
+
+Enable structural validation and safe automatic repair after an unknown task error:
+
+```sh
+context-guardian --thread-id 019f... --once \
+  --enable-message-format-preview
+```
+
+Also issue one minimal live request through the current user's Codex CLI, authentication, model, provider, and proxy environment:
+
+```sh
+context-guardian --thread-id 019f... --once \
+  --enable-message-format-preview \
+  --enable-message-format-live-probe
+```
+
+The preview validates compacted `replacement_history`, message roles/content blocks, function arguments, and tool outputs. It normalizes only lossless cases such as stringified history, string content that should be a typed array, role-mismatched `input_text`/`output_text`, or structured tool arguments that should be JSON strings. If any difference cannot be repaired without guessing, the rollout is left unchanged.
+
+The live probe is ephemeral, uses an empty temporary working directory, cannot write to the workspace, and is asked not to call tools. Its output is discarded. It confirms that the current user environment can produce a healthy request; it does not MITM TLS, capture authorization headers, or store raw request/message bodies. A probe consumes one minimal model request and must succeed before automatic repair when live probing is enabled.
+
+Before an applied repair, Guardian backs up the rollout and removes the unknown failure record that would otherwise retrigger the broken turn. Schema-only reports are written mode `0600` under `$CODEX_HOME/context-guardian/message-format-reports`; reports contain field paths and value types, never message text or credentials.
+
+Enable the preview for a newly installed managed service:
+
+```sh
+CONTEXT_GUARDIAN_MESSAGE_FORMAT_PREVIEW=1 \
+CONTEXT_GUARDIAN_MESSAGE_FORMAT_LIVE_PROBE=1 \
+./scripts/service.sh install 019f... ./target/release/context-guardian
+```
+
 ## Managed Guardian service
 
 ```sh
@@ -132,10 +164,10 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Caddy obtains and renews HTTPS certificates automatically on ports 80/443. Point clients to it during installation:
+Caddy uses port 80 for automatic certificate issuance and exposes HTTPS on ports 5003/5004. Point clients to it during installation:
 
 ```sh
-CONTEXT_RELAY_URL=https://relay.example.com ./scripts/install.sh
+CONTEXT_RELAY_URL=https://relay.example.com:5003 ./scripts/install.sh
 ```
 
 See [relay/README.md](relay/README.md) for the complete server deployment and security model.
@@ -166,6 +198,8 @@ Tools:
 - `relay_client_service`: install/remove/status for the optional Relay client; mutations require confirmation.
 
 The MCP validates task IDs and image parameters, and kills child processes whose output exceeds 1 MiB.
+
+`recover_context` also accepts the preview fields `message_format_preview`, `message_format_live_probe`, `message_format_probe_timeout_seconds`, and `message_format_probe_command`. `guardian_service` accepts the two preview booleans during installation. Live probing requires message-format preview to be enabled.
 
 ## Agent Skill
 
@@ -208,6 +242,7 @@ Local gateway requests always bypass proxy environment variables.
 - Recovery cannot recreate details already lost from a poor compaction summary.
 - A live Codex app-server may briefly rewrite stale counters; daemon mode converges them again.
 - Codex local schemas may evolve; unknown layouts fail closed.
+- Message-format preview cannot reconstruct missing semantic content; it repairs only structural transformations that are lossless.
 - The public Relay does not persist images, but its operator can observe transient bytes and traffic metadata.
 - Managed Relay client setup is currently macOS-only; the Rust client itself is portable.
 
