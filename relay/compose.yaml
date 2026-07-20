@@ -41,6 +41,7 @@ services:
       - /tmp:size=8m,mode=1777
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./site:/srv:ro
       - relay-caddy-data:/data
     logging:
       driver: local
